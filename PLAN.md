@@ -50,7 +50,7 @@ Source: `D:\Code\KaleidoSage`. Copy the file, then change the names. Do not writ
 | Installer asset | `VideoSage_<version>_x64-setup.exe` |
 | Updater user agent | `VideoSage-Updater` |
 | Project file | `.vsage` |
-| Dev ports | 14520 (Vite), 14521 (HMR), 14522 (preview). Check first that no other Sage app uses them. |
+| Dev ports | 14530 (Vite), 14531 (HMR), 14532 (preview). ChatSage uses 14520 and 14521. |
 | First version | `0.1.0` |
 
 ### Files to copy and adapt
@@ -166,8 +166,8 @@ type Project = { version: 1; fps: number; width: number; height: number; media: 
 
 Each phase ends with a working app and a commit.
 
-1. **Shell.** Copy the conventions in section 3. `git init`. Result: an empty Video Sage window with splash, title bar, menu bar, About dialog, window state, single instance. `npm run build` and `cargo check` pass. Copy `installer.nsi` now.
-2. **Editor core.** `src/editor/` with Vitest tests for every operation, snap and history. No UI.
+1. **Shell (done).** Copy the conventions in section 3. `git init`. Result: an empty Video Sage window with splash, title bar, menu bar, About dialog, window state, single instance. `npm run build` and `cargo check` pass. Copy `installer.nsi` now.
+2. **Editor core (done).** `src/editor/` with Vitest tests for every operation, snap and history. No UI.
 3. **Import.** FFmpeg and ffprobe in place. Import dialog and drag-and-drop of files, probe, media list with thumbnails.
 4. **Timeline view.** Ruler, zoom, scroll, clips with strips, playhead, selection (click, Ctrl+click, box).
 5. **Timeline edit.** Drag with snap, trim handles, split, join, cut, copy, paste, delete, close gaps, undo, redo, menu items and shortcuts.
