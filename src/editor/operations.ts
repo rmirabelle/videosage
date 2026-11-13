@@ -1,4 +1,4 @@
-import { clipEnd, newId, type Clip, type ClipboardClip, type Project } from "./model";
+import { clipEnd, newId, type Clip, type ClipboardClip, type MediaItem, type Project } from "./model";
 import { mediaLength } from "./time";
 
 /**
@@ -178,4 +178,16 @@ export function pasteClips(project: Project, clipboard: readonly ClipboardClip[]
 export function removeMedia(project: Project, mediaId: string): Project {
   if (!project.media.some((item) => item.id === mediaId)) return project;
   return { ...project, media: project.media.filter((item) => item.id !== mediaId), clips: project.clips.filter((clip) => clip.mediaId !== mediaId) };
+}
+
+/**
+ * Adds an imported media file to the project. A file that the project
+ * already has is not added again. The first file of an empty project sets
+ * the project frame rate and frame size.
+ */
+export function addMedia(project: Project, item: MediaItem): Project {
+  if (project.media.some((other) => other.path === item.path)) return project;
+  const first = project.media.length === 0 && project.clips.length === 0;
+  const settings = first ? { fps: Math.min(120, Math.max(1, Math.round(item.fps * 1000) / 1000)), width: item.width, height: item.height } : {};
+  return { ...project, ...settings, media: [...project.media, item] };
 }

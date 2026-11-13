@@ -15,6 +15,8 @@ export interface MediaItem {
   width: number;
   height: number;
   hasSound: boolean;
+  /** True when the preview player can play the file as it is; false when it needs a preview copy. */
+  playable: boolean;
   /** A preview copy, for a file that the webview cannot play. */
   proxyPath?: string;
 }

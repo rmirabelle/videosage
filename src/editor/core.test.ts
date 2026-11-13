@@ -10,7 +10,7 @@ const sample: Project = {
   fps: 30,
   width: 1920,
   height: 1080,
-  media: [{ id: "a", path: "C:\\Videos\\a.mp4", name: "a.mp4", durationSec: 10, fps: 30, width: 1920, height: 1080, hasSound: true }],
+  media: [{ id: "a", path: "C:\\Videos\\a.mp4", name: "a.mp4", durationSec: 10, fps: 30, width: 1920, height: 1080, hasSound: true, playable: true }],
   clips: [
     { id: "x", mediaId: "a", start: 10, sourceIn: 0, length: 20 },
     { id: "y", mediaId: "a", start: 50, sourceIn: 20, length: 30 }

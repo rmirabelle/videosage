@@ -1,3 +1,4 @@
+mod media;
 mod updater;
 
 use std::time::Duration;
@@ -87,6 +88,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             log_frontend_error,
             cursor_position,
+            media::probe_media,
+            media::media_thumbnail,
             updater::check_for_update,
             updater::download_and_run_installer,
             updater::get_app_version

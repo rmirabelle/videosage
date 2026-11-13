@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { clipEnd, type Clip, type MediaItem, type Project } from "./model";
-import { canJoin, clipAt, closeGaps, copyClips, deleteClips, insertMedia, joinClips, moveClips, pasteClips, removeMedia, splitAt, trimEnd, trimStart } from "./operations";
+import { addMedia, canJoin, clipAt, closeGaps, copyClips, deleteClips, insertMedia, joinClips, moveClips, pasteClips, removeMedia, splitAt, trimEnd, trimStart } from "./operations";
 
 /** A 10 s media file: 300 frames at the project's 30 fps. */
-const media = (id: string): MediaItem => ({ id, path: `C:\\Videos\\${id}.mp4`, name: `${id}.mp4`, durationSec: 10, fps: 30, width: 1920, height: 1080, hasSound: true });
+const media = (id: string): MediaItem => ({ id, path: `C:\\Videos\\${id}.mp4`, name: `${id}.mp4`, durationSec: 10, fps: 30, width: 1920, height: 1080, hasSound: true, playable: true });
 
 const clip = (id: string, start: number, length: number, sourceIn = 0, mediaId = "a"): Clip => ({ id, mediaId, start, sourceIn, length });
 
@@ -200,5 +200,21 @@ describe("insertMedia", () => {
     expectValid(second.project);
     expect(second.project.clips.map((item) => [item.mediaId, item.start])).toEqual([["a", 0], ["b", 300]]);
     expect(insertMedia(project(), "none", 0).clipId).toBeNull();
+  });
+});
+
+describe("addMedia", () => {
+  it("sets the project frame rate and size from the first file only", () => {
+    const empty: Project = { version: 1, fps: 30, width: 1920, height: 1080, media: [], clips: [] };
+    const first = addMedia(empty, { ...media("a"), fps: 24000 / 1001, width: 1280, height: 720 });
+    expect([first.fps, first.width, first.height]).toEqual([23.976, 1280, 720]);
+    const second = addMedia(first, { ...media("b"), fps: 60, width: 3840, height: 2160 });
+    expect([second.fps, second.width, second.height]).toEqual([23.976, 1280, 720]);
+    expect(second.media).toHaveLength(2);
+  });
+
+  it("does not add the same file two times", () => {
+    const p = project();
+    expect(addMedia(p, { ...media("a"), id: "other" })).toBe(p);
   });
 });

@@ -30,7 +30,8 @@ function readMedia(value: unknown): MediaItem {
     fps: value.fps,
     width: isPositive(value.width) ? value.width : 0,
     height: isPositive(value.height) ? value.height : 0,
-    hasSound: value.hasSound === true
+    hasSound: value.hasSound === true,
+    playable: value.playable !== false
   };
 }
 
