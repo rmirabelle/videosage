@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { clipEnd, type Clip, type MediaItem, type Project } from "./model";
-import { addMedia, canJoin, clipAt, closeGaps, copyClips, deleteClips, insertMedia, joinClips, moveClips, pasteClips, removeMedia, splitAt, trimEnd, trimStart } from "./operations";
+import { addMedia, canJoin, clipAt, closeGaps, copyClips, deleteClips, insertMedia, joinClips, moveClips, pasteClips, relinkMedia, removeMedia, splitAt, trimEnd, trimStart } from "./operations";
 
 /** A 10 s media file: 300 frames at the project's 30 fps. */
 const media = (id: string): MediaItem => ({ id, path: `C:\\Videos\\${id}.mp4`, name: `${id}.mp4`, durationSec: 10, fps: 30, width: 1920, height: 1080, hasSound: true, playable: true });
@@ -216,5 +216,24 @@ describe("addMedia", () => {
   it("does not add the same file two times", () => {
     const p = project();
     expect(addMedia(p, { ...media("a"), id: "other" })).toBe(p);
+  });
+});
+
+describe("relinkMedia", () => {
+  const found = (seconds: number, path = "D:\\Moved\\a2.mp4"): MediaItem => ({ ...media("new"), path, name: "a2.mp4", durationSec: seconds });
+
+  it("points the item at the new file and keeps its id and clips", () => {
+    const p = project(clip("x", 0, 100));
+    const result = relinkMedia(p, "a", found(10))!;
+    expect(result.media[0]).toMatchObject({ id: "a", path: "D:\\Moved\\a2.mp4", name: "a2.mp4" });
+    expect(result.clips).toBe(p.clips);
+  });
+
+  it("gives null when the new file is too short for a clip", () => {
+    expect(relinkMedia(project(clip("x", 0, 100, 150)), "a", found(5))).toBeNull();
+  });
+
+  it("gives null when the project already has the new file", () => {
+    expect(relinkMedia(project(), "a", found(10, media("b").path))).toBeNull();
   });
 });

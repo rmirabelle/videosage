@@ -181,6 +181,21 @@ export function removeMedia(project: Project, mediaId: string): Project {
 }
 
 /**
+ * Points a media item at a different file (the user found a file that was
+ * missing). The item keeps its id, so its clips stay. Gives null when the new
+ * file is too short for a clip that uses the item, or when the project
+ * already has the new file as a different item.
+ */
+export function relinkMedia(project: Project, mediaId: string, found: MediaItem): Project | null {
+  if (!project.media.some((item) => item.id === mediaId)) return project;
+  if (project.media.some((item) => item.id !== mediaId && item.path === found.path)) return null;
+  const next = { ...found, id: mediaId };
+  const length = mediaLength(next, project.fps);
+  if (project.clips.some((clip) => clip.mediaId === mediaId && clip.sourceIn + clip.length > length)) return null;
+  return { ...project, media: project.media.map((item) => item.id === mediaId ? next : item) };
+}
+
+/**
  * Adds an imported media file to the project. A file that the project
  * already has is not added again. The first file of an empty project sets
  * the project frame rate and frame size.

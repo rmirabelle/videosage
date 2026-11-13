@@ -334,6 +334,7 @@ button { border: 0; }
 .media-badges span { display: inline-flex; align-items: center; gap: 3px; }
 .media-badges .warning { color: #f5a524; }
 .media-badges .working { color: var(--secondary); }
+.media-find { align-self: flex-start; margin-top: 3px; }
 .media-actions { position: absolute; top: 4px; right: 4px; display: none; gap: 2px; }
 .media-item:hover .media-actions { display: flex; }
 .media-actions button { width: 20px; height: 20px; display: grid; place-items: center; border-radius: 4px; color: #8f94a3; background: #262a35; cursor: pointer; }

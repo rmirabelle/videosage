@@ -1,7 +1,7 @@
 import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { Check } from "@phosphor-icons/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AboutDialog } from "./components/AboutDialog";
@@ -15,8 +15,10 @@ import { Timeline, type TimelineHandle } from "./components/Timeline";
 import { TitleBar } from "./components/TitleBar";
 import { canRedo, canUndo, record, redo, startHistory, undo } from "./editor/history";
 import { clipEnd, emptyProject, projectEnd, type ClipboardClip, type MediaItem, type Project } from "./editor/model";
-import { addMedia, canJoin, clipAt, closeGaps, copyClips, deleteClips, insertMedia, joinClips, pasteClips, removeMedia, splitAt } from "./editor/operations";
+import { addMedia, canJoin, clipAt, closeGaps, copyClips, deleteClips, insertMedia, joinClips, pasteClips, relinkMedia, removeMedia, splitAt } from "./editor/operations";
+import { FILE_EXTENSION, parseProject, serializeProject } from "./editor/projectFile";
 import { probeMedia, VIDEO_EXTENSIONS } from "./lib/media";
+import { addRecentProject, missingFiles, readProjectFile, recentProjects, writeProjectFile } from "./lib/projects";
 import { revealMainWindow } from "./lib/splash";
 import { checkForUpdate, getAppVersion, type UpdateInfo } from "./lib/updater";
 import { makeProxy, onProxyProgress, videoUrl, type ProxyState } from "./lib/videos";
@@ -27,6 +29,13 @@ const later = { disabled: true, run: () => {} };
 const fileName = (path: string) => path.split(/[\\/]/).pop() ?? path;
 
 const NO_SELECTION: ReadonlySet<string> = new Set();
+const NO_PATHS: ReadonlySet<string> = new Set();
+
+const PROJECT_FILTERS = [{ name: "Video Sage project", extensions: [FILE_EXTENSION] }];
+/** The most recent projects that the File menu shows. */
+const RECENT_IN_MENU = 5;
+
+const messageOf = (error: unknown) => error instanceof Error ? error.message : String(error);
 
 let nextNoticeId = 1;
 
@@ -54,8 +63,25 @@ export default function App() {
   /** The URL that plays each file, by the path of the file or of its preview copy. */
   const [playUrls, setPlayUrls] = useState<Record<string, string>>({});
   const timelineRef = useRef<TimelineHandle>(null);
+  /** The path of the open project's file; null for a project that was never saved. */
+  const [filePath, setFilePath] = useState<string | null>(null);
+  /** The project as its file has it. The project has changes to save when it is not this object. */
+  const [saved, setSaved] = useState(history.present);
+  const [recent, setRecent] = useState<string[]>([]);
+  /** The paths of the media files that were not found when the project opened. */
+  const [missing, setMissing] = useState<ReadonlySet<string>>(NO_PATHS);
+  /** The "Save changes?" question is open; "then" runs after the user saves or chooses not to save. */
+  const [asking, setAsking] = useState<{ then: () => void } | null>(null);
 
   const project = history.present;
+  const dirty = project !== saved;
+  const dirtyRef = useRef(dirty);
+  dirtyRef.current = dirty;
+  const filePathRef = useRef(filePath);
+  filePathRef.current = filePath;
+  const missingRef = useRef(missing);
+  missingRef.current = missing;
+  const projectName = filePath ? fileName(filePath) : "Untitled Project";
   const projectRef = useRef(project);
   projectRef.current = project;
   const end = projectEnd(project);
@@ -124,6 +150,109 @@ export default function App() {
     else edit((current) => removeMedia(current, item.id));
   }, [edit]);
 
+  /** Shows a project as the open project, with no undo steps and no changes to save. */
+  const showProject = (next: Project, path: string | null, notFound: ReadonlySet<string>) => {
+    setHistory(startHistory(next));
+    setSaved(next);
+    setFilePath(path);
+    setMissing(notFound);
+    setSelection(NO_SELECTION);
+    setClipboard([]);
+    setPlaying(false);
+    setPlayheadFrame(0);
+    setSeekCount((count) => count + 1);
+  };
+
+  const rememberRecent = (path: string) => {
+    addRecentProject(path).then(setRecent).catch(() => {});
+  };
+
+  /** Writes the project to a file. Gives true when the file is written. */
+  const saveTo = async (path: string) => {
+    const current = projectRef.current;
+    try {
+      await writeProjectFile(path, serializeProject(current));
+    } catch (error) {
+      notify(`Could not save ${fileName(path)}. ${messageOf(error)}`);
+      return false;
+    }
+    setSaved(current);
+    setFilePath(path);
+    rememberRecent(path);
+    return true;
+  };
+
+  const saveProjectAs = async () => {
+    if (!isTauri()) return false;
+    const picked = await save({ title: "Save Project As", defaultPath: filePathRef.current ?? `Untitled Project.${FILE_EXTENSION}`, filters: PROJECT_FILTERS });
+    return picked ? saveTo(picked) : false;
+  };
+
+  const saveProject = () => filePathRef.current ? saveTo(filePathRef.current) : saveProjectAs();
+
+  /** Runs the action now, or after the user answers "Save changes?" when the project has changes. */
+  const afterSaveQuestion = (action: () => void) => {
+    if (dirtyRef.current) setAsking({ then: action });
+    else action();
+  };
+
+  const openPath = async (path: string) => {
+    try {
+      const next = parseProject(await readProjectFile(path));
+      const notFound = await missingFiles(next.media.map((item) => item.path));
+      showProject(next, path, new Set(notFound));
+      rememberRecent(path);
+      if (notFound.length === 1) notify(`Video Sage cannot find ${fileName(notFound[0])}. Use "Find file" in the Media list.`);
+      else if (notFound.length > 1) notify(`Video Sage cannot find ${notFound.length} media files. Use "Find file" in the Media list.`);
+    } catch (error) {
+      notify(`Could not open ${fileName(path)}. ${messageOf(error)}`);
+    }
+  };
+
+  const openProject = async () => {
+    if (!isTauri()) return;
+    const picked = await open({ multiple: false, title: "Open Project", filters: PROJECT_FILTERS });
+    if (typeof picked === "string") await openPath(picked);
+  };
+
+  /**
+   * The user shows where a missing media file is now. Other missing files
+   * with their old names in the same folder are found too.
+   */
+  const relink = async (item: MediaItem) => {
+    if (!isTauri()) return;
+    const picked = await open({ multiple: false, title: `Find ${item.name}`, filters: [{ name: "Video files", extensions: VIDEO_EXTENSIONS }] });
+    if (typeof picked !== "string") return;
+    try {
+      const found: [string, MediaItem][] = [[item.id, await probeMedia(picked)]];
+      if (!relinkMedia(projectRef.current, item.id, found[0][1])) {
+        notify(`${fileName(picked)} cannot take the place of ${item.name}. It is shorter than the clips that use it, or the project already has it.`);
+        return;
+      }
+      const folder = picked.slice(0, picked.length - fileName(picked).length);
+      for (const other of projectRef.current.media) {
+        if (other.id === item.id || !missingRef.current.has(other.path)) continue;
+        try {
+          found.push([other.id, await probeMedia(folder + fileName(other.path))]);
+        } catch {
+          /* That file is not in this folder; it stays missing. */
+        }
+      }
+      edit((current) => found.reduce((next, [id, file]) => relinkMedia(next, id, file) ?? next, current));
+    } catch (error) {
+      notify(`Could not use ${fileName(picked)}. ${messageOf(error)}`);
+    }
+  };
+
+  /** Files dropped on the window: a project file opens, video files are imported. */
+  const dropPaths = (paths: string[]) => {
+    const projectPath = paths.find((path) => path.toLowerCase().endsWith(`.${FILE_EXTENSION}`));
+    if (projectPath) afterSaveQuestion(() => void openPath(projectPath));
+    else void importPaths(paths);
+  };
+  const dropPathsRef = useRef(dropPaths);
+  dropPathsRef.current = dropPaths;
+
   /**
    * The edit commands, for the menus, the keys and the timeline's buttons.
    * Each one has "can" (false shows the menu item disabled) and "run".
@@ -133,6 +262,10 @@ export default function App() {
   const hasSelection = selection.size > 0;
   const splitClip = clipAt(project, playhead);
   const commands = {
+    newProject: { can: true, run: () => afterSaveQuestion(() => showProject(emptyProject(), null, NO_PATHS)) },
+    openProject: { can: true, run: () => afterSaveQuestion(() => void openProject()) },
+    save: { can: true, run: () => void saveProject() },
+    saveAs: { can: true, run: () => void saveProjectAs() },
     undo: { can: canUndo(history), run: () => setHistory(undo) },
     redo: { can: canRedo(history), run: () => setHistory(redo) },
     copy: { can: hasSelection, run: () => setClipboard(copyClips(project, selection)) },
@@ -175,13 +308,25 @@ export default function App() {
     let cancelled = false;
     getAppVersion().then((version) => { if (!cancelled) setAppVersion(version); }).catch(() => {});
     checkForUpdate().then((info) => { if (!cancelled && info) setStartupUpdate(info); }).catch(() => {});
+    recentProjects().then((list) => { if (!cancelled) setRecent(list); }).catch(() => {});
     return () => { cancelled = true; };
+  }, []);
+
+  /* A close of the window with changes that are not saved asks "Save changes?" first. */
+  useEffect(() => {
+    if (!isTauri()) return;
+    const unlisten = getCurrentWindow().onCloseRequested((event) => {
+      if (!dirtyRef.current) return;
+      event.preventDefault();
+      setAsking({ then: () => void getCurrentWindow().destroy() });
+    });
+    return () => { void unlisten.then((stop) => stop()); };
   }, []);
 
   /* A file that the player cannot play directly gets a preview copy, made one time and kept in the cache. */
   useEffect(() => {
     for (const item of project.media) {
-      if (item.playable || proxiesRef.current[item.path]) continue;
+      if (item.playable || missing.has(item.path) || proxiesRef.current[item.path]) continue;
       const set = (state: ProxyState) => setProxies((current) => ({ ...current, [item.path]: state }));
       proxiesRef.current = { ...proxiesRef.current, [item.path]: { status: "making", fraction: 0 } };
       set({ status: "making", fraction: 0 });
@@ -192,7 +337,7 @@ export default function App() {
           notify(`${item.name}: ${String(error)}`);
         });
     }
-  }, [project.media, notify]);
+  }, [project.media, missing, notify]);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -214,12 +359,12 @@ export default function App() {
     if (!isTauri()) return;
     for (const item of project.media) {
       const path = playPath(item);
-      if (!path || playUrls[path]) continue;
+      if (!path || missing.has(item.path) || playUrls[path]) continue;
       videoUrl(path)
         .then((url) => setPlayUrls((current) => current[path] ? current : { ...current, [path]: url }))
         .catch((error) => notify(`Could not open ${item.name} for the preview. ${String(error)}`));
     }
-  }, [project.media, playPath, playUrls, notify]);
+  }, [project.media, missing, playPath, playUrls, notify]);
 
   const sources = useMemo(() => {
     const map = new Map<string, string>();
@@ -236,10 +381,10 @@ export default function App() {
     const unlisten = getCurrentWebview().onDragDropEvent((event) => {
       if (event.payload.type === "enter" || event.payload.type === "over") setDropActive(true);
       else setDropActive(false);
-      if (event.payload.type === "drop") void importPaths(event.payload.paths);
+      if (event.payload.type === "drop") dropPathsRef.current(event.payload.paths);
     });
     return () => { void unlisten.then((stop) => stop()); };
-  }, [importPaths]);
+  }, []);
 
   /* The keys. Each key is the same as its menu item (see also src/help/shortcuts.ts). */
   useEffect(() => {
@@ -255,6 +400,10 @@ export default function App() {
       };
       let handled = true;
       if (event.key === "?") setShortcutsOpen(true);
+      else if (ctrl && key === "n") run("newProject");
+      else if (ctrl && key === "o") run("openProject");
+      else if (ctrl && key === "s") run("save");
+      else if (ctrlShift && key === "s") run("saveAs");
       else if (ctrl && key === "i") void importMedia();
       else if (ctrl && key === "z") run("undo");
       else if ((ctrl && key === "y") || (ctrlShift && key === "z")) run("redo");
@@ -290,17 +439,25 @@ export default function App() {
     run: () => commandsRef.current[name].run()
   });
 
+  /* The recent projects show in the File menu with a number, newest first. */
+  const recentItems: Menu["items"] = recent.slice(0, RECENT_IN_MENU).map((path, index) => ({
+    label: `${index + 1}  ${fileName(path)}`,
+    run: () => afterSaveQuestion(() => void openPath(path))
+  }));
+
   const menus: Menu[] = [
     {
       id: "file",
       label: "File",
       items: [
-        { label: "New Project", shortcut: "Ctrl+N", ...later },
-        { label: "Open Project…", shortcut: "Ctrl+O", ...later },
+        item("New Project", "Ctrl+N", "newProject"),
+        item("Open Project…", "Ctrl+O", "openProject"),
         "separator",
-        { label: "Save", shortcut: "Ctrl+S", ...later },
-        { label: "Save As…", shortcut: "Ctrl+Shift+S", ...later },
+        item("Save", "Ctrl+S", "save"),
+        item("Save As…", "Ctrl+Shift+S", "saveAs"),
         "separator",
+        ...recentItems,
+        ...(recentItems.length > 0 ? ["separator" as const] : []),
         { label: "Import Media…", shortcut: "Ctrl+I", run: () => void importMedia() },
         { label: "Export Video…", shortcut: "Ctrl+E", ...later },
         "separator",
@@ -350,10 +507,10 @@ export default function App() {
 
   return (
     <div className="app">
-      <TitleBar updateAvailable={startupUpdate !== null} onAbout={() => setAboutOpen(true)} fileName="Untitled Project" dirty={false} />
+      <TitleBar updateAvailable={startupUpdate !== null} onAbout={() => setAboutOpen(true)} fileName={projectName} dirty={dirty} />
       <MenuBar menus={menus} />
       <main className="workspace">
-        <MediaBin media={project.media} proxies={proxies} importing={importing} dropActive={dropActive} onImport={() => void importMedia()} onRemove={requestRemove} onAddToTimeline={addToTimeline} />
+        <MediaBin media={project.media} proxies={proxies} missing={missing} onRelink={(media) => void relink(media)} importing={importing} dropActive={dropActive} onImport={() => void importMedia()} onRemove={requestRemove} onAddToTimeline={addToTimeline} />
         <Preview
           project={project}
           playhead={playhead}
@@ -386,6 +543,20 @@ export default function App() {
           confirmLabel="Remove"
           onConfirm={() => { edit((current) => removeMedia(current, removing.id)); setRemoving(null); }}
           onCancel={() => setRemoving(null)}
+        />
+      )}
+      {asking && (
+        <ConfirmDialog
+          title="Save changes?"
+          message={<><strong>{projectName}</strong> has changes that are not saved.</>}
+          confirmLabel="Save"
+          otherLabel="Don't Save"
+          onConfirm={() => {
+            setAsking(null);
+            void saveProject().then((written) => { if (written) asking.then(); });
+          }}
+          onOther={() => { setAsking(null); asking.then(); }}
+          onCancel={() => setAsking(null)}
         />
       )}
       {aboutOpen && <AboutDialog version={appVersion} initialUpdateInfo={startupUpdate} onClose={() => setAboutOpen(false)} />}

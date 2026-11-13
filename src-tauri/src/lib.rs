@@ -1,4 +1,5 @@
 mod media;
+mod project;
 mod proxy;
 mod updater;
 mod video_stream;
@@ -98,6 +99,11 @@ pub fn run() {
             cursor_position,
             media::probe_media,
             media::media_thumbnail,
+            project::read_project,
+            project::write_project,
+            project::recent_projects,
+            project::add_recent_project,
+            project::missing_files,
             proxy::make_proxy,
             video_stream::open_video_file,
             updater::check_for_update,
