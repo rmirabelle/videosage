@@ -1,0 +1,46 @@
+import { describe, expect, it } from "vitest";
+import { exportSegments, sizeForHeight } from "./export";
+import type { Clip, MediaItem, Project } from "./model";
+
+const media = (id: string, hasSound = true): MediaItem => ({ id, path: `C:\\Videos\\${id}.mp4`, name: `${id}.mp4`, durationSec: 10, fps: 30, width: 1920, height: 1080, hasSound, playable: true });
+
+const clip = (id: string, start: number, length: number, sourceIn = 0, mediaId = "a"): Clip => ({ id, mediaId, start, sourceIn, length });
+
+const project = (...clips: Clip[]): Project => ({ version: 1, fps: 30, width: 1920, height: 1080, media: [media("a"), media("b", false)], clips });
+
+describe("exportSegments", () => {
+  it("gives the clips and the gaps in the sequence of the timeline", () => {
+    const segments = exportSegments(project(clip("y", 100, 60, 0, "b"), clip("x", 30, 45, 15)), 30);
+    expect(segments).toEqual([
+      { path: null, startSec: 0, frames: 30, hasSound: false },
+      { path: "C:\\Videos\\a.mp4", startSec: 0.5, frames: 45, hasSound: true },
+      { path: null, startSec: 0, frames: 25, hasSound: false },
+      { path: "C:\\Videos\\b.mp4", startSec: 0, frames: 60, hasSound: false }
+    ]);
+  });
+
+  it("joins a clip that continues the clip before it", () => {
+    const segments = exportSegments(project(clip("x", 0, 40), clip("y", 40, 20, 40), clip("z", 60, 10, 90)), 30);
+    expect(segments.map((segment) => [segment.startSec, segment.frames])).toEqual([[0, 60], [3, 10]]);
+  });
+
+  it("keeps the total length at a different frame rate", () => {
+    const p = project(clip("x", 0, 7), clip("y", 7, 7, 50), clip("z", 20, 7, 100));
+    const total = (fps: number) => exportSegments(p, fps).reduce((sum, segment) => sum + segment.frames, 0);
+    expect(total(60)).toBe(54);
+    expect(total(24)).toBe(Math.round((27 * 24) / 30));
+    expect(total(25)).toBe(Math.round((27 * 25) / 30));
+  });
+
+  it("gives no segments for an empty timeline", () => {
+    expect(exportSegments(project(), 30)).toEqual([]);
+  });
+});
+
+describe("sizeForHeight", () => {
+  it("keeps the shape of the project and gives even numbers", () => {
+    expect(sizeForHeight(project(), 720)).toEqual({ width: 1280, height: 720 });
+    expect(sizeForHeight({ ...project(), width: 1080, height: 1920 }, 480)).toEqual({ width: 270, height: 480 });
+    expect(sizeForHeight({ ...project(), width: 1000, height: 333 }, 333).height % 2).toBe(0);
+  });
+});

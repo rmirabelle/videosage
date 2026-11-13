@@ -6,6 +6,7 @@ import { Check } from "@phosphor-icons/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AboutDialog } from "./components/AboutDialog";
 import { ConfirmDialog } from "./components/ConfirmDialog";
+import { ExportDialog } from "./components/ExportDialog";
 import { MediaBin } from "./components/MediaBin";
 import { MenuBar, type Menu } from "./components/MenuBar";
 import { Notices, type Notice } from "./components/Notices";
@@ -22,9 +23,6 @@ import { addRecentProject, missingFiles, readProjectFile, recentProjects, writeP
 import { revealMainWindow } from "./lib/splash";
 import { checkForUpdate, getAppVersion, type UpdateInfo } from "./lib/updater";
 import { makeProxy, onProxyProgress, videoUrl, type ProxyState } from "./lib/videos";
-
-/** A menu command that a later build phase adds; it shows disabled until then. */
-const later = { disabled: true, run: () => {} };
 
 const fileName = (path: string) => path.split(/[\\/]/).pop() ?? path;
 
@@ -44,6 +42,7 @@ export default function App() {
   const [startupUpdate, setStartupUpdate] = useState<UpdateInfo | null>(null);
   const [aboutOpen, setAboutOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
   const [history, setHistory] = useState(() => startHistory(emptyProject()));
   const [importing, setImporting] = useState<string[]>([]);
   const [dropActive, setDropActive] = useState(false);
@@ -266,6 +265,13 @@ export default function App() {
     openProject: { can: true, run: () => afterSaveQuestion(() => void openProject()) },
     save: { can: true, run: () => void saveProject() },
     saveAs: { can: true, run: () => void saveProjectAs() },
+    exportVideo: {
+      can: end > 0,
+      run: () => {
+        setPlaying(false);
+        setExportOpen(true);
+      }
+    },
     undo: { can: canUndo(history), run: () => setHistory(undo) },
     redo: { can: canRedo(history), run: () => setHistory(redo) },
     copy: { can: hasSelection, run: () => setClipboard(copyClips(project, selection)) },
@@ -405,6 +411,7 @@ export default function App() {
       else if (ctrl && key === "s") run("save");
       else if (ctrlShift && key === "s") run("saveAs");
       else if (ctrl && key === "i") void importMedia();
+      else if (ctrl && key === "e") run("exportVideo");
       else if (ctrl && key === "z") run("undo");
       else if ((ctrl && key === "y") || (ctrlShift && key === "z")) run("redo");
       else if (ctrl && key === "x") run("cut");
@@ -459,7 +466,7 @@ export default function App() {
         ...recentItems,
         ...(recentItems.length > 0 ? ["separator" as const] : []),
         { label: "Import Media…", shortcut: "Ctrl+I", run: () => void importMedia() },
-        { label: "Export Video…", shortcut: "Ctrl+E", ...later },
+        item("Export Video…", "Ctrl+E", "exportVideo"),
         "separator",
         { label: "Exit", shortcut: "Alt+F4", run: () => { if (isTauri()) void getCurrentWindow().close(); } }
       ]
@@ -557,6 +564,14 @@ export default function App() {
           }}
           onOther={() => { setAsking(null); asking.then(); }}
           onCancel={() => setAsking(null)}
+        />
+      )}
+      {exportOpen && (
+        <ExportDialog
+          project={project}
+          missing={missing}
+          suggestedPath={filePath ? filePath.replace(/\.[^.\\/]*$/, "") + ".mp4" : "Untitled Project.mp4"}
+          onClose={() => setExportOpen(false)}
         />
       )}
       {aboutOpen && <AboutDialog version={appVersion} initialUpdateInfo={startupUpdate} onClose={() => setAboutOpen(false)} />}

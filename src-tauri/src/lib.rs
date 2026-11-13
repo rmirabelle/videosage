@@ -1,3 +1,4 @@
+mod export;
 mod media;
 mod project;
 mod proxy;
@@ -99,6 +100,9 @@ pub fn run() {
             cursor_position,
             media::probe_media,
             media::media_thumbnail,
+            export::export_video,
+            export::cancel_export,
+            export::show_in_folder,
             project::read_project,
             project::write_project,
             project::recent_projects,

@@ -173,7 +173,7 @@ Each phase ends with a working app and a commit.
 5. **Timeline edit (done).** Drag with snap, trim handles, split, join, cut, copy, paste, delete, close gaps, undo, redo, menu items and shortcuts.
 6. **Preview (done).** Player with two video elements, transport controls, scrub, frame step, proxy files.
 7. **Project file (done).** New, Open, Save, Save As, "Save changes?" on close, recent files, a missing-media message with a relink command.
-8. **Export.** Export dialog (size, frame rate, quality), progress, cancel.
+8. **Export (done).** Export dialog (size, frame rate, quality), progress, cancel.
 9. **Release.** Updater check at start and from the Help menu, `set-version.ps1`, `publish.ps1`, `docs/RELEASING.md`, README. Create the GitHub repository. Test the installer with a normal (not silent) install and check the shortcut icons. Publish only when the user says so.
 
 ## 8. Keyboard shortcuts
