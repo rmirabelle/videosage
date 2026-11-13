@@ -114,6 +114,12 @@ pub fn run() {
             updater::download_and_run_installer,
             updater::get_app_version
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Video Sage");
+        .build(tauri::generate_context!())
+        .expect("error while running Video Sage")
+        .run(|_app, event| {
+            // An export that is in progress stops with the app, so FFmpeg does not run on with no window.
+            if matches!(event, tauri::RunEvent::Exit) {
+                export::cancel_export();
+            }
+        });
 }

@@ -69,8 +69,11 @@ export default function App() {
   const [recent, setRecent] = useState<string[]>([]);
   /** The paths of the media files that were not found when the project opened. */
   const [missing, setMissing] = useState<ReadonlySet<string>>(NO_PATHS);
-  /** The "Save changes?" question is open; "then" runs after the user saves or chooses not to save. */
-  const [asking, setAsking] = useState<{ then: () => void } | null>(null);
+  /**
+   * The "Save changes?" question is open. "then" runs after the user saves
+   * or chooses not to save; "cancel" runs when the user cancels.
+   */
+  const [asking, setAsking] = useState<{ then: () => void; cancel?: () => void } | null>(null);
 
   const project = history.present;
   const dirty = project !== saved;
@@ -194,6 +197,15 @@ export default function App() {
     if (dirtyRef.current) setAsking({ then: action });
     else action();
   };
+
+  /**
+   * For the update install, which closes the app: asks "Save changes?" when
+   * the project has changes. Gives false when the user cancels or the save fails.
+   */
+  const settleChanges = () => new Promise<boolean>((resolve) => {
+    if (!dirtyRef.current) resolve(true);
+    else setAsking({ then: () => resolve(true), cancel: () => resolve(false) });
+  });
 
   const openPath = async (path: string) => {
     try {
@@ -552,20 +564,6 @@ export default function App() {
           onCancel={() => setRemoving(null)}
         />
       )}
-      {asking && (
-        <ConfirmDialog
-          title="Save changes?"
-          message={<><strong>{projectName}</strong> has changes that are not saved.</>}
-          confirmLabel="Save"
-          otherLabel="Don't Save"
-          onConfirm={() => {
-            setAsking(null);
-            void saveProject().then((written) => { if (written) asking.then(); });
-          }}
-          onOther={() => { setAsking(null); asking.then(); }}
-          onCancel={() => setAsking(null)}
-        />
-      )}
       {exportOpen && (
         <ExportDialog
           project={project}
@@ -574,8 +572,23 @@ export default function App() {
           onClose={() => setExportOpen(false)}
         />
       )}
-      {aboutOpen && <AboutDialog version={appVersion} initialUpdateInfo={startupUpdate} onClose={() => setAboutOpen(false)} />}
+      {aboutOpen && <AboutDialog version={appVersion} initialUpdateInfo={startupUpdate} onClose={() => setAboutOpen(false)} beforeInstall={settleChanges} />}
       {shortcutsOpen && <ShortcutsDialog onClose={() => setShortcutsOpen(false)} />}
+      {/* The last dialog in the page shows on top: this question can come up over the About dialog. */}
+      {asking && (
+        <ConfirmDialog
+          title="Save changes?"
+          message={<><strong>{projectName}</strong> has changes that are not saved.</>}
+          confirmLabel="Save"
+          otherLabel="Don't Save"
+          onConfirm={() => {
+            setAsking(null);
+            void saveProject().then((written) => { if (written) asking.then(); else asking.cancel?.(); });
+          }}
+          onOther={() => { setAsking(null); asking.then(); }}
+          onCancel={() => { setAsking(null); asking.cancel?.(); }}
+        />
+      )}
     </div>
   );
 }
