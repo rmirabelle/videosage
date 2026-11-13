@@ -140,10 +140,20 @@ describe("trim", () => {
 });
 
 describe("delete and close gaps", () => {
-  it("deletes the selected clips and leaves the others in place", () => {
-    const p = project(clip("x", 0, 10), clip("y", 20, 10), clip("z", 40, 10));
-    expect(layout(deleteClips(p, ids("y")))).toEqual([["x", 0, 10], ["z", 40, 10]]);
+  it("deletes the selected clips and moves the later clips back by their length", () => {
+    const p = project(clip("x", 0, 10), clip("y", 10, 10), clip("z", 20, 10));
+    expect(layout(deleteClips(p, ids("y")))).toEqual([["x", 0, 10], ["z", 10, 10]]);
+    expect(layout(deleteClips(p, ids("x", "y")))).toEqual([["z", 0, 10]]);
     expect(deleteClips(p, ids("none"))).toBe(p);
+  });
+
+  it("keeps the gaps that were there before the delete", () => {
+    const p = project(clip("w", 0, 10), clip("x", 15, 10), clip("y", 30, 20), clip("z", 60, 10));
+    const result = deleteClips(p, ids("x"));
+    expect(layout(result)).toEqual([["w", 0, 10], ["y", 20, 20], ["z", 50, 10]]);
+    expectValid(result);
+    /* The clip before the deleted clip does not move. */
+    expect(result.clips[0]).toBe(p.clips[0]);
   });
 
   it("closes all gaps from frame 0", () => {

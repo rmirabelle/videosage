@@ -91,9 +91,20 @@ export function joinClips(project: Project, ids: ReadonlySet<string>): Project {
   return withClips(project, project.clips.flatMap((clip) => clip.id === joined.id ? [joined] : ids.has(clip.id) ? [] : [clip]));
 }
 
+/**
+ * Deletes the clips. Each clip after a deleted clip moves back by the
+ * length of that clip, so the delete leaves no hole. Gaps that were there
+ * before the delete stay.
+ */
 export function deleteClips(project: Project, ids: ReadonlySet<string>): Project {
-  const clips = project.clips.filter((clip) => !ids.has(clip.id));
-  return clips.length === project.clips.length ? project : { ...project, clips };
+  if (!project.clips.some((clip) => ids.has(clip.id))) return project;
+  let removed = 0;
+  const clips: Clip[] = [];
+  for (const clip of [...project.clips].sort((a, b) => a.start - b.start)) {
+    if (ids.has(clip.id)) removed += clip.length;
+    else clips.push(removed > 0 ? { ...clip, start: clip.start - removed } : clip);
+  }
+  return { ...project, clips };
 }
 
 /**
