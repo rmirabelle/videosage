@@ -94,22 +94,29 @@ interface ClipViewProps {
 const ClipView = memo(function ClipView({ clip, media, fps, zoom, selected, dragging, viewLeft, viewRight }: ClipViewProps) {
   const left = clip.start * zoom;
   const width = clip.length * zoom;
-  const tiles: { index: number; atSec: number }[] = [];
+  const tiles: { index: number; atSec: number; left: number }[] = [];
   let tileWidth = 80;
   if (media && media.height > 0) {
-    tileWidth = Math.min(160, Math.max(30, Math.round(STRIP_HEIGHT * media.width / media.height)));
+    const pictureWidth = Math.min(160, Math.max(30, Math.round(STRIP_HEIGHT * media.width / media.height)));
     /**
-     * Tile times go to a grid of 1, 2, 4, 8 ... seconds (or parts of a
-     * second), so a small zoom change or a trim uses the same pictures again.
+     * The strip is a film of the whole media file, and the clip is a window
+     * on it. Tile number k shows the frame at k * grid seconds and has its
+     * place at that time, so a trim hides or shows a part of the film and a
+     * split cuts it: the pictures always agree with what the clip holds.
+     * The grid is 1, 2, 4, 8 ... seconds (or parts of a second), so a zoom
+     * change uses the same pictures again. A tile is from half a picture to
+     * one picture wide.
      */
-    const tileSeconds = tileWidth / zoom / fps;
-    const grid = 2 ** Math.ceil(Math.log2(tileSeconds));
-    const first = Math.max(0, Math.floor((viewLeft - left) / tileWidth) - 1);
-    const last = Math.min(Math.ceil(width / tileWidth) - 1, Math.floor((viewRight - left) / tileWidth) + 1, first + 120);
+    const grid = 2 ** Math.floor(Math.log2(pictureWidth / zoom / fps));
+    tileWidth = grid * fps * zoom;
+    /* The place of the clip's left side on the film, in pixels. */
+    const filmLeft = clip.sourceIn * zoom;
+    const from = filmLeft + Math.max(0, viewLeft - left);
+    const to = filmLeft + Math.min(width, viewRight - left);
+    const first = Math.floor(from / tileWidth);
+    const last = Math.min(Math.ceil(to / tileWidth) - 1, first + 240);
     for (let index = first; index <= last; index++) {
-      const seconds = (clip.sourceIn + (index * tileWidth) / zoom) / fps;
-      const atSec = Math.max(0, Math.min(Math.floor(seconds / grid) * grid, media.durationSec - 0.1));
-      tiles.push({ index, atSec });
+      tiles.push({ index, atSec: Math.max(0, Math.min(index * grid, media.durationSec - 0.1)), left: index * tileWidth - filmLeft });
     }
   }
   return (
@@ -120,7 +127,7 @@ const ClipView = memo(function ClipView({ clip, media, fps, zoom, selected, drag
     >
       <div className="clip-name">{media?.name ?? "Missing media"}</div>
       <div className="clip-strip">
-        {media && tiles.map((tile) => <StripTile key={tile.index} path={media.path} atSec={tile.atSec} left={tile.index * tileWidth} width={tileWidth} />)}
+        {media && tiles.map((tile) => <StripTile key={tile.index} path={media.path} atSec={tile.atSec} left={tile.left} width={tileWidth} />)}
       </div>
       {/* The two ends: a drag on one trims the clip. */}
       <div className="clip-handle start" data-handle="start" />
@@ -427,7 +434,8 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline({ pr
         </div>
       </header>
       <div className="timeline-scroll" ref={scrollRef} onScroll={(event) => setScrollLeft(event.currentTarget.scrollLeft)}>
-        <div className="timeline-content" ref={contentRef} style={{ width: contentWidth }}>
+        {/* A press on the empty area under the track clears the selection. */}
+        <div className="timeline-content" ref={contentRef} style={{ width: contentWidth }} onPointerDown={(event) => { if (event.button === 0 && event.target === event.currentTarget && !event.ctrlKey) onSelect(new Set()); }}>
           <div className="timeline-ruler" onPointerDown={onRulerPointerDown} onPointerMove={onRulerPointerMove}>
             {marks.map((mark) => (
               <div key={mark.frame} className={mark.major ? "ruler-mark major" : "ruler-mark"} style={{ left: mark.frame * zoom }}>
@@ -436,7 +444,7 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline({ pr
             ))}
           </div>
           <div className="timeline-track" onPointerDown={onTrackPointerDown} onPointerMove={onTrackPointerMove} onPointerUp={onTrackPointerUp} onPointerCancel={onTrackPointerUp}>
-            {project.clips.length === 0 && <p className="timeline-empty">Double-click a video in the Media list to put it on the timeline.</p>}
+            {project.clips.length === 0 && <p className="timeline-empty">Import a video to put it on the timeline.</p>}
             {project.clips.map((clip) => (
               <ClipView
                 key={clip.id}

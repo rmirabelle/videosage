@@ -112,7 +112,11 @@ export default function App() {
     setNotices((current) => [...current, { id: nextNoticeId++, text }]);
   }, []);
 
-  /** Reads the files one at a time and adds each video to the media list. A file that fails shows a message. */
+  /**
+   * Reads the files one at a time. Each video goes in the media list and on
+   * the timeline, after the last clip, as one undo step. A file that fails
+   * shows a message.
+   */
   const importPaths = useCallback(async (paths: string[]) => {
     for (const path of paths) {
       if (projectRef.current.media.some((item) => item.path === path)) continue;
@@ -120,7 +124,10 @@ export default function App() {
       setImporting((current) => [...current, name]);
       try {
         const item = await probeMedia(path);
-        edit((current) => addMedia(current, item));
+        edit((current) => {
+          const withMedia = addMedia(current, item);
+          return withMedia === current ? current : insertMedia(withMedia, item.id, projectEnd(withMedia)).project;
+        });
       } catch (error) {
         notify(`Could not import ${name}. ${String(error)}`);
       } finally {
