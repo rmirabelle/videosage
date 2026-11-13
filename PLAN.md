@@ -171,7 +171,7 @@ Each phase ends with a working app and a commit.
 3. **Import (done).** FFmpeg and ffprobe in place. Import dialog and drag-and-drop of files, probe, media list with thumbnails.
 4. **Timeline view (done).** Ruler, zoom, scroll, clips with strips, playhead, selection (click, Ctrl+click, box).
 5. **Timeline edit (done).** Drag with snap, trim handles, split, join, cut, copy, paste, delete, close gaps, undo, redo, menu items and shortcuts.
-6. **Preview.** Player with two video elements, transport controls, scrub, frame step, proxy files.
+6. **Preview (done).** Player with two video elements, transport controls, scrub, frame step, proxy files.
 7. **Project file.** New, Open, Save, Save As, "Save changes?" on close, recent files, a missing-media message with a relink command.
 8. **Export.** Export dialog (size, frame rate, quality), progress, cancel.
 9. **Release.** Updater check at start and from the Help menu, `set-version.ps1`, `publish.ps1`, `docs/RELEASING.md`, README. Create the GitHub repository. Test the installer with a normal (not silent) install and check the shortcut icons. Publish only when the user says so.

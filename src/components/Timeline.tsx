@@ -41,6 +41,8 @@ interface Props {
   onToggleSnapping: () => void;
   /** Splits the clip under the playhead; null when no clip can be split there. */
   onSplit: (() => void) | null;
+  /** True during play: the view scrolls to keep the playhead on screen. */
+  follow: boolean;
 }
 
 /** What a press on the track does until the pointer is released. */
@@ -135,7 +137,7 @@ const ClipView = memo(function ClipView({ clip, media, fps, zoom, selected, drag
  * A drag on a clip moves the selected clips; a drag on a clip's end trims it.
  * With snapping on, a dragged edge snaps to clip ends, the playhead and 0.
  */
-export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline({ project: savedProject, playhead, onPlayhead, selection, onSelect, onCommit, snapping, onToggleSnapping, onSplit }, ref) {
+export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline({ project: savedProject, playhead, onPlayhead, selection, onSelect, onCommit, snapping, onToggleSnapping, onSplit, follow }, ref) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const [zoom, setZoom] = useState(DEFAULT_ZOOM);
@@ -203,6 +205,14 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline({ pr
     anchor.current = null;
     setScrollLeft(element.scrollLeft);
   }, [zoom]);
+
+  /* During play, when the playhead leaves the view, the view jumps so that the playhead is near its left side. */
+  useEffect(() => {
+    const element = scrollRef.current;
+    if (!follow || !element) return;
+    const x = playhead * zoom - element.scrollLeft;
+    if (x < 0 || x > element.clientWidth - 24) element.scrollLeft = Math.max(0, playhead * zoom - element.clientWidth * 0.1);
+  }, [follow, playhead, zoom]);
 
   /* The first clips on an empty track show whole. */
   const hadClips = useRef(false);

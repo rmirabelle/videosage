@@ -9,9 +9,7 @@ export const FILE_VERSION = 1;
 export const FILE_EXTENSION = "vsage";
 
 export function serializeProject(project: Project): string {
-  /* Preview copies are in the cache folder of one computer, so they are not saved. */
-  const media = project.media.map(({ proxyPath: _proxyPath, ...item }) => item);
-  return JSON.stringify({ app: "Video Sage", ...project, media }, null, 2);
+  return JSON.stringify({ app: "Video Sage", ...project }, null, 2);
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);

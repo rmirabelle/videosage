@@ -87,11 +87,6 @@ describe("project file", () => {
     expect(parseProject(serializeProject(emptyProject()))).toEqual(emptyProject());
   });
 
-  it("does not save the preview copy path", () => {
-    const withProxy = { ...sample, media: [{ ...sample.media[0], proxyPath: "C:\\cache\\a.mp4" }] };
-    expect(serializeProject(withProxy)).not.toContain("proxyPath");
-  });
-
   it("refuses text that is not a correct project", () => {
     const change = (edit: (data: Record<string, any>) => void) => {
       const data = JSON.parse(serializeProject(sample));

@@ -4,7 +4,7 @@ import { newId, type MediaItem } from "../editor/model";
 /** The file types that the import dialog shows. ffprobe decides if a file is really a video. */
 export const VIDEO_EXTENSIONS = ["mp4", "m4v", "mov", "webm", "mkv", "avi", "wmv", "mpg", "mpeg", "ts", "mts", "m2ts", "flv", "3gp"];
 
-type MediaInfo = Omit<MediaItem, "id" | "proxyPath"> & { videoCodec: string };
+type MediaInfo = Omit<MediaItem, "id"> & { videoCodec: string };
 
 /** Reads the facts of a video file and makes a media item for the project. Rejects with a message for the user. */
 export async function probeMedia(path: string): Promise<MediaItem> {

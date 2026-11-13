@@ -1,5 +1,7 @@
 mod media;
+mod proxy;
 mod updater;
+mod video_stream;
 
 use std::time::Duration;
 use tauri::Manager;
@@ -73,6 +75,12 @@ pub fn run() {
         restore_main_window(app);
     }));
     builder
+        .manage(video_stream::Videos::default())
+        .register_asynchronous_uri_scheme_protocol("video", |ctx, request, responder| {
+            let id = request.uri().path().trim_start_matches('/');
+            let source = ctx.app_handle().state::<video_stream::Videos>().get(id);
+            tauri::async_runtime::spawn_blocking(move || responder.respond(video_stream::response(request, source)));
+        })
         .plugin(tauri_plugin_dialog::init())
         .plugin(
             // The splash window is always centered, so its state is not saved.
@@ -90,6 +98,8 @@ pub fn run() {
             cursor_position,
             media::probe_media,
             media::media_thumbnail,
+            proxy::make_proxy,
+            video_stream::open_video_file,
             updater::check_for_update,
             updater::download_and_run_installer,
             updater::get_app_version

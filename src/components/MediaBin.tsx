@@ -2,9 +2,12 @@ import { ArrowLineDown, CircleNotch, FilmStrip, Plus, SpeakerSlash, Warning, X }
 import { useEffect, useState } from "react";
 import type { MediaItem } from "../editor/model";
 import { formatDuration, formatFps, thumbnailUrl } from "../lib/media";
+import type { ProxyState } from "../lib/videos";
 
 interface Props {
   media: MediaItem[];
+  /** The preview copies of the files that the player cannot play directly, by file path. */
+  proxies: Readonly<Record<string, ProxyState>>;
   /** The names of files that an import reads now. */
   importing: string[];
   /** True while the user holds dragged files over the window. */
@@ -32,7 +35,15 @@ function Thumbnail({ media }: { media: MediaItem }) {
 }
 
 /** The media list: the imported video files, with the Import button. */
-export function MediaBin({ media, importing, dropActive, onImport, onRemove, onAddToTimeline }: Props) {
+/** The state of a file's preview copy, as a line in the media list. Nothing shows when the copy is ready. */
+function ProxyBadge({ state }: { state: ProxyState | undefined }) {
+  if (state?.status === "ready") return null;
+  if (state?.status === "failed") return <span className="warning" title="Video Sage could not make a preview copy of this file. The preview is black for it; the export still uses the file."><Warning size={13} /> No preview</span>;
+  const percent = state ? Math.round(state.fraction * 100) : 0;
+  return <span className="working" title="The preview player cannot play this file directly. Video Sage makes a preview copy of it."><CircleNotch className="spin" size={13} /> Preview copy {percent}%</span>;
+}
+
+export function MediaBin({ media, proxies, importing, dropActive, onImport, onRemove, onAddToTimeline }: Props) {
   const empty = media.length === 0 && importing.length === 0;
   return (
     <section className={`panel media-bin ${dropActive ? "drop-active" : ""}`} aria-label="Media">
@@ -58,7 +69,7 @@ export function MediaBin({ media, importing, dropActive, onImport, onRemove, onA
                 <span className="media-facts">{item.width}×{item.height} · {formatFps(item.fps)} fps</span>
                 <span className="media-badges">
                   {!item.hasSound && <span title="This video has no sound"><SpeakerSlash size={13} /> No sound</span>}
-                  {!item.playable && <span className="warning" title="The preview player cannot play this file directly. Video Sage makes a preview copy of it."><Warning size={13} /> Needs a preview copy</span>}
+                  {!item.playable && <ProxyBadge state={proxies[item.path]} />}
                 </span>
               </div>
               <div className="media-actions" onDoubleClick={(event) => event.stopPropagation()}>

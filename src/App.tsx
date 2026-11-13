@@ -9,6 +9,7 @@ import { ConfirmDialog } from "./components/ConfirmDialog";
 import { MediaBin } from "./components/MediaBin";
 import { MenuBar, type Menu } from "./components/MenuBar";
 import { Notices, type Notice } from "./components/Notices";
+import { Preview } from "./components/Preview";
 import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { Timeline, type TimelineHandle } from "./components/Timeline";
 import { TitleBar } from "./components/TitleBar";
@@ -18,6 +19,7 @@ import { addMedia, canJoin, clipAt, closeGaps, copyClips, deleteClips, insertMed
 import { probeMedia, VIDEO_EXTENSIONS } from "./lib/media";
 import { revealMainWindow } from "./lib/splash";
 import { checkForUpdate, getAppVersion, type UpdateInfo } from "./lib/updater";
+import { makeProxy, onProxyProgress, videoUrl, type ProxyState } from "./lib/videos";
 
 /** A menu command that a later build phase adds; it shows disabled until then. */
 const later = { disabled: true, run: () => {} };
@@ -42,6 +44,15 @@ export default function App() {
   const [rawSelection, setSelection] = useState<ReadonlySet<string>>(NO_SELECTION);
   const [clipboard, setClipboard] = useState<ClipboardClip[]>([]);
   const [snapping, setSnapping] = useState(true);
+  const [playing, setPlaying] = useState(false);
+  /** Goes up by one each time the user moves the playhead; the player follows it during play. */
+  const [seekCount, setSeekCount] = useState(0);
+  /** The preview copies of the files that the player cannot play directly, by file path. */
+  const [proxies, setProxies] = useState<Record<string, ProxyState>>({});
+  const proxiesRef = useRef(proxies);
+  proxiesRef.current = proxies;
+  /** The URL that plays each file, by the path of the file or of its preview copy. */
+  const [playUrls, setPlayUrls] = useState<Record<string, string>>({});
   const timelineRef = useRef<TimelineHandle>(null);
 
   const project = history.present;
@@ -61,6 +72,7 @@ export default function App() {
   /** Moves the playhead to a frame; it stops at frame 0 and at the end of the last clip. */
   const movePlayhead = useCallback((frame: number) => {
     setPlayheadFrame(Math.max(0, Math.min(Math.round(frame), projectEnd(projectRef.current))));
+    setSeekCount((count) => count + 1);
   }, []);
 
   /** Makes an edit to the project, as one undo step. An edit that changes nothing makes no step. */
@@ -141,6 +153,7 @@ export default function App() {
         setSelection(ids);
         /* The playhead goes to the end of the pasted clips, so the next paste comes after them. */
         setPlayheadFrame(Math.max(...pasted.project.clips.filter((clip) => ids.has(clip.id)).map(clipEnd)));
+        setSeekCount((count) => count + 1);
       }
     },
     delete: { can: hasSelection, run: () => edit((current) => deleteClips(current, selection)) },
@@ -148,7 +161,8 @@ export default function App() {
     split: { can: splitClip !== undefined && splitClip.start !== playhead, run: () => edit((current) => splitAt(current, playhead)) },
     join: { can: canJoin(project, selection), run: () => edit((current) => joinClips(current, selection)) },
     closeGaps: { can: closeGaps(project) !== project, run: () => edit(closeGaps) },
-    toggleSnapping: { can: true, run: () => setSnapping((current) => !current) }
+    toggleSnapping: { can: true, run: () => setSnapping((current) => !current) },
+    togglePlay: { can: end > 0, run: () => setPlaying((current) => !current) }
   };
   const commandsRef = useRef(commands);
   commandsRef.current = commands;
@@ -163,6 +177,58 @@ export default function App() {
     checkForUpdate().then((info) => { if (!cancelled && info) setStartupUpdate(info); }).catch(() => {});
     return () => { cancelled = true; };
   }, []);
+
+  /* A file that the player cannot play directly gets a preview copy, made one time and kept in the cache. */
+  useEffect(() => {
+    for (const item of project.media) {
+      if (item.playable || proxiesRef.current[item.path]) continue;
+      const set = (state: ProxyState) => setProxies((current) => ({ ...current, [item.path]: state }));
+      proxiesRef.current = { ...proxiesRef.current, [item.path]: { status: "making", fraction: 0 } };
+      set({ status: "making", fraction: 0 });
+      makeProxy(item.path, item.durationSec)
+        .then((path) => set({ status: "ready", path }))
+        .catch((error) => {
+          set({ status: "failed" });
+          notify(`${item.name}: ${String(error)}`);
+        });
+    }
+  }, [project.media, notify]);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    const unlisten = onProxyProgress((path, fraction) => {
+      setProxies((current) => current[path]?.status === "making" ? { ...current, [path]: { status: "making", fraction } } : current);
+    });
+    return () => { void unlisten.then((stop) => stop()); };
+  }, []);
+
+  /** The path that the preview plays for a media file: the file, or its preview copy; null while the copy is not ready. */
+  const playPath = useCallback((item: MediaItem) => {
+    if (item.playable) return item.path;
+    const proxy = proxies[item.path];
+    return proxy?.status === "ready" ? proxy.path : null;
+  }, [proxies]);
+
+  /* Each file that can play gets its URL from Rust. */
+  useEffect(() => {
+    if (!isTauri()) return;
+    for (const item of project.media) {
+      const path = playPath(item);
+      if (!path || playUrls[path]) continue;
+      videoUrl(path)
+        .then((url) => setPlayUrls((current) => current[path] ? current : { ...current, [path]: url }))
+        .catch((error) => notify(`Could not open ${item.name} for the preview. ${String(error)}`));
+    }
+  }, [project.media, playPath, playUrls, notify]);
+
+  const sources = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const item of project.media) {
+      const path = playPath(item);
+      if (path && playUrls[path]) map.set(item.id, playUrls[path]);
+    }
+    return map;
+  }, [project.media, playPath, playUrls]);
 
   /* Files dropped on the window from File Explorer are imported. */
   useEffect(() => {
@@ -200,6 +266,7 @@ export default function App() {
       else if (plain && (key === "delete" || key === "backspace")) run("delete");
       else if (plain && key === "s") run("split");
       else if (plain && key === "n") run("toggleSnapping");
+      else if (plain && key === " ") run("togglePlay");
       else if (ctrl && (key === "=" || key === "+")) timelineRef.current?.zoomIn();
       else if (ctrl && key === "-") timelineRef.current?.zoomOut();
       else if (ctrl && key === "0") timelineRef.current?.zoomToFit();
@@ -286,10 +353,17 @@ export default function App() {
       <TitleBar updateAvailable={startupUpdate !== null} onAbout={() => setAboutOpen(true)} fileName="Untitled Project" dirty={false} />
       <MenuBar menus={menus} />
       <main className="workspace">
-        <MediaBin media={project.media} importing={importing} dropActive={dropActive} onImport={() => void importMedia()} onRemove={requestRemove} onAddToTimeline={addToTimeline} />
-        <section className="panel preview-panel" aria-label="Preview">
-          <p className="placeholder">The preview comes in the next build phase.</p>
-        </section>
+        <MediaBin media={project.media} proxies={proxies} importing={importing} dropActive={dropActive} onImport={() => void importMedia()} onRemove={requestRemove} onAddToTimeline={addToTimeline} />
+        <Preview
+          project={project}
+          playhead={playhead}
+          sources={sources}
+          playing={playing}
+          onPlaying={setPlaying}
+          onPlayerFrame={setPlayheadFrame}
+          onSeek={movePlayhead}
+          seekCount={seekCount}
+        />
         <Timeline
           ref={timelineRef}
           project={project}
@@ -301,6 +375,7 @@ export default function App() {
           snapping={snapping}
           onToggleSnapping={commands.toggleSnapping.run}
           onSplit={commands.split.can ? commands.split.run : null}
+          follow={playing}
         />
       </main>
       <Notices notices={notices} onClose={(id) => setNotices((current) => current.filter((notice) => notice.id !== id))} />
