@@ -1,0 +1,23 @@
+node_modules
+dist
+*.local
+
+src-tauri/target
+src-tauri/gen
+
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+Thumbs.db
+*.log
+
+# TypeScript build cache
+*.tsbuildinfo
+
+# The icon pack the app icons came from; a source file kept outside the repository
+/icon-pack.zip
+
+# FFmpeg and ffprobe, too large for GitHub; tools/get-ffmpeg.ps1 downloads them
+/src-tauri/ffmpeg/ffmpeg.exe
+/src-tauri/ffmpeg/ffprobe.exe
