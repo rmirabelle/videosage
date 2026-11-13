@@ -9,10 +9,11 @@ import { MediaBin } from "./components/MediaBin";
 import { MenuBar, type Menu } from "./components/MenuBar";
 import { Notices, type Notice } from "./components/Notices";
 import { ShortcutsDialog } from "./components/ShortcutsDialog";
+import { Timeline, type TimelineHandle } from "./components/Timeline";
 import { TitleBar } from "./components/TitleBar";
 import { record, startHistory } from "./editor/history";
-import { emptyProject, type MediaItem, type Project } from "./editor/model";
-import { addMedia, removeMedia } from "./editor/operations";
+import { emptyProject, projectEnd, type MediaItem, type Project } from "./editor/model";
+import { addMedia, insertMedia, removeMedia } from "./editor/operations";
 import { probeMedia, VIDEO_EXTENSIONS } from "./lib/media";
 import { revealMainWindow } from "./lib/splash";
 import { checkForUpdate, getAppVersion, type UpdateInfo } from "./lib/updater";
@@ -34,10 +35,23 @@ export default function App() {
   const [dropActive, setDropActive] = useState(false);
   const [notices, setNotices] = useState<Notice[]>([]);
   const [removing, setRemoving] = useState<MediaItem | null>(null);
+  const [playheadFrame, setPlayheadFrame] = useState(0);
+  const [selection, setSelection] = useState<ReadonlySet<string>>(() => new Set());
+  const timelineRef = useRef<TimelineHandle>(null);
 
   const project = history.present;
   const projectRef = useRef(project);
   projectRef.current = project;
+  const end = projectEnd(project);
+  /* The playhead stays on the timeline when an edit makes the timeline shorter. */
+  const playhead = Math.min(playheadFrame, end);
+  const playheadRef = useRef(playhead);
+  playheadRef.current = playhead;
+
+  /** Moves the playhead to a frame; it stops at frame 0 and at the end of the last clip. */
+  const movePlayhead = useCallback((frame: number) => {
+    setPlayheadFrame(Math.max(0, Math.min(Math.round(frame), projectEnd(projectRef.current))));
+  }, []);
 
   /** Makes an edit to the project, as one undo step. */
   const edit = useCallback((change: (project: Project) => Project) => {
@@ -67,6 +81,14 @@ export default function App() {
       }
     }
   }, [edit, notify]);
+
+  /** Puts a media file on the timeline after the last clip, and selects the new clip. */
+  const addToTimeline = useCallback((item: MediaItem) => {
+    const added = insertMedia(projectRef.current, item.id, projectEnd(projectRef.current));
+    if (!added.clipId) return;
+    edit(() => added.project);
+    setSelection(new Set([added.clipId]));
+  }, [edit]);
 
   const importMedia = useCallback(async () => {
     if (!isTauri()) return;
@@ -103,15 +125,27 @@ export default function App() {
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if ((event.target as HTMLElement | null)?.closest("input, textarea")) return;
+      const ctrl = event.ctrlKey && !event.shiftKey && !event.altKey;
+      const plain = !event.ctrlKey && !event.shiftKey && !event.altKey;
+      const key = event.key.toLowerCase();
+      let handled = true;
       if (event.key === "?") setShortcutsOpen(true);
-      else if (event.ctrlKey && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "i") {
-        event.preventDefault();
-        void importMedia();
-      }
+      else if (ctrl && key === "i") void importMedia();
+      else if (ctrl && key === "a") setSelection(new Set(projectRef.current.clips.map((clip) => clip.id)));
+      else if (ctrl && (key === "=" || key === "+")) timelineRef.current?.zoomIn();
+      else if (ctrl && key === "-") timelineRef.current?.zoomOut();
+      else if (ctrl && key === "0") timelineRef.current?.zoomToFit();
+      else if (plain && key === "escape") setSelection(new Set());
+      else if (plain && key === "home") movePlayhead(0);
+      else if (plain && key === "end") movePlayhead(Infinity);
+      else if (plain && key === "arrowleft") movePlayhead(playheadRef.current - 1);
+      else if (plain && key === "arrowright") movePlayhead(playheadRef.current + 1);
+      else handled = false;
+      if (handled) event.preventDefault();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [importMedia]);
+  }, [importMedia, movePlayhead]);
 
   const menus = useMemo<Menu[]>(() => [
     {
@@ -141,7 +175,7 @@ export default function App() {
         { label: "Copy", shortcut: "Ctrl+C", ...later },
         { label: "Paste", shortcut: "Ctrl+V", ...later },
         { label: "Delete", shortcut: "Delete", ...later },
-        { label: "Select All", shortcut: "Ctrl+A", ...later },
+        { label: "Select All", shortcut: "Ctrl+A", run: () => setSelection(new Set(projectRef.current.clips.map((clip) => clip.id))) },
         "separator",
         { label: "Split at Playhead", shortcut: "S", ...later },
         { label: "Join Clips", shortcut: "Ctrl+J", ...later },
@@ -152,9 +186,9 @@ export default function App() {
       id: "view",
       label: "View",
       items: [
-        { label: "Zoom In", shortcut: "Ctrl+=", ...later },
-        { label: "Zoom Out", shortcut: "Ctrl+-", ...later },
-        { label: "Zoom to Fit", shortcut: "Ctrl+0", ...later },
+        { label: "Zoom In", shortcut: "Ctrl+=", run: () => timelineRef.current?.zoomIn() },
+        { label: "Zoom Out", shortcut: "Ctrl+-", run: () => timelineRef.current?.zoomOut() },
+        { label: "Zoom to Fit", shortcut: "Ctrl+0", run: () => timelineRef.current?.zoomToFit() },
         "separator",
         { label: "Snapping", shortcut: "N", ...later }
       ]
@@ -176,13 +210,11 @@ export default function App() {
       <TitleBar updateAvailable={startupUpdate !== null} onAbout={() => setAboutOpen(true)} fileName="Untitled Project" dirty={false} />
       <MenuBar menus={menus} />
       <main className="workspace">
-        <MediaBin media={project.media} importing={importing} dropActive={dropActive} onImport={() => void importMedia()} onRemove={requestRemove} />
+        <MediaBin media={project.media} importing={importing} dropActive={dropActive} onImport={() => void importMedia()} onRemove={requestRemove} onAddToTimeline={addToTimeline} />
         <section className="panel preview-panel" aria-label="Preview">
           <p className="placeholder">The preview comes in a later build phase.</p>
         </section>
-        <section className="panel timeline-panel" aria-label="Timeline">
-          <p className="placeholder">The timeline comes in the next build phase.</p>
-        </section>
+        <Timeline ref={timelineRef} project={project} playhead={playhead} onPlayhead={movePlayhead} selection={selection} onSelect={setSelection} />
       </main>
       <Notices notices={notices} onClose={(id) => setNotices((current) => current.filter((notice) => notice.id !== id))} />
       {removing && (

@@ -328,27 +328,17 @@ button { border: 0; }
 }
 .media-thumbnail img { width: 100%; height: 100%; object-fit: contain; display: block; }
 .media-duration { position: absolute; right: 3px; bottom: 3px; padding: 0 4px; border-radius: 3px; color: #e4e6ec; background: rgba(0,0,0,.72); font-size: 10px; line-height: 15px; font-variant-numeric: tabular-nums; }
-.media-text { min-width: 0; flex: 1; display: flex; flex-direction: column; justify-content: center; gap: 2px; padding-right: 16px; }
+.media-text { min-width: 0; flex: 1; display: flex; flex-direction: column; justify-content: center; gap: 2px; }
 .media-name { overflow: hidden; color: #e4e6ec; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .media-facts { color: var(--muted); font-size: 11px; }
 .media-badges { display: flex; flex-wrap: wrap; gap: 8px; color: var(--muted); font-size: 10px; }
 .media-badges span { display: inline-flex; align-items: center; gap: 3px; }
 .media-badges .warning { color: #f5a524; }
-.media-remove {
-  width: 20px;
-  height: 20px;
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  display: none;
-  place-items: center;
-  border-radius: 4px;
-  color: #8f94a3;
-  background: transparent;
-  cursor: pointer;
-}
-.media-item:hover .media-remove { display: grid; }
-.media-remove:hover { color: #fff; background: #c42b1c; }
+.media-actions { position: absolute; top: 4px; right: 4px; display: none; gap: 2px; }
+.media-item:hover .media-actions { display: flex; }
+.media-actions button { width: 20px; height: 20px; display: grid; place-items: center; border-radius: 4px; color: #8f94a3; background: #262a35; cursor: pointer; }
+.media-actions button:hover { color: #fff; background: var(--accent); }
+.media-actions .media-remove:hover { background: #c42b1c; }
 
 /* Error messages in the bottom right corner. */
 .notices { position: fixed; z-index: 170; right: 14px; bottom: 14px; width: min(420px, calc(100vw - 28px)); display: flex; flex-direction: column; gap: 8px; }
@@ -370,3 +360,42 @@ button { border: 0; }
 .notice > button { flex: 0 0 auto; width: 22px; height: 22px; display: grid; place-items: center; border-radius: 4px; color: #b9a3a3; background: transparent; cursor: pointer; }
 .notice > button:hover { color: #fff; background: rgba(255,255,255,.1); }
 .confirm-dialog-content strong { color: #e4e6ec; }
+
+/* The timeline: a header with the timecode and the zoom buttons, then the ruler and the track, which scroll together. */
+.timeline-panel .panel-header { justify-content: flex-start; gap: 16px; }
+.timeline-timecode { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.timeline-timecode strong { color: #e4e6ec; font-weight: 600; }
+.timeline-tools { display: flex; gap: 2px; margin-left: auto; }
+.timeline-tools button { width: 28px; height: 26px; display: grid; place-items: center; border-radius: 5px; color: #b9bdc8; background: transparent; cursor: pointer; }
+.timeline-tools button:hover:not(:disabled) { color: #fff; background: rgba(255,255,255,.08); }
+.timeline-tools button:disabled { opacity: .4; cursor: default; }
+.timeline-scroll { flex: 1; min-height: 0; overflow-x: auto; overflow-y: hidden; background: #16181f; scrollbar-color: #474c5e #16181f; }
+.timeline-content { position: relative; min-height: 100%; }
+.timeline-ruler { height: 24px; position: relative; overflow: hidden; border-bottom: 1px solid #2c303b; background: #1a1d25; cursor: ew-resize; }
+.ruler-mark { position: absolute; bottom: 0; width: 1px; height: 5px; background: #3f4454; pointer-events: none; }
+.ruler-mark.major { height: 10px; background: #626a7d; }
+.ruler-mark span { position: absolute; bottom: 9px; left: 4px; color: #8c91a1; font-size: 10px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.timeline-track { height: 72px; position: relative; margin-top: 8px; background: #1d2029; border-top: 1px solid #262a35; border-bottom: 1px solid #262a35; }
+.timeline-empty { position: sticky; left: 0; width: max-content; margin: 0; padding: 27px 16px; color: #5d6272; font-size: 12px; pointer-events: none; }
+.timeline-box { position: absolute; top: 0; bottom: 0; border: 1px solid var(--accent); background: rgba(75,118,247,.16); pointer-events: none; }
+.timeline-playhead { position: absolute; z-index: 5; top: 0; bottom: 0; width: 1px; margin-left: -.5px; background: #ff5c5c; pointer-events: none; }
+.timeline-playhead::before { content: ""; position: absolute; top: 0; left: -5px; border: 5.5px solid transparent; border-top: 8px solid #ff5c5c; }
+
+/* A clip: its name on a bar in the media file's colour, over a strip of pictures (46px high: STRIP_HEIGHT in Timeline.tsx). */
+.clip {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  min-width: 2px;
+  overflow: hidden;
+  border-radius: 5px;
+  background: hsl(var(--clip-hue) 32% 24%);
+  cursor: default;
+}
+/* The frame is drawn over the pictures, so it shows on all four sides. */
+.clip::after { content: ""; position: absolute; inset: 0; border-radius: inherit; box-shadow: inset 0 0 0 1px hsl(var(--clip-hue) 40% 50%); pointer-events: none; }
+.clip.selected::after { box-shadow: inset 0 0 0 2px #fff; }
+.clip-name { height: 18px; padding: 0 6px; overflow: hidden; color: #f1f2f4; background: hsl(var(--clip-hue) 40% 34%); font-size: 10.5px; line-height: 18px; text-overflow: ellipsis; white-space: nowrap; pointer-events: none; }
+.clip.selected .clip-name { background: var(--accent); }
+.clip-strip { height: 46px; position: relative; pointer-events: none; }
+.clip-tile { position: absolute; top: 0; bottom: 0; background-color: hsl(var(--clip-hue) 30% 18%); background-position: center; background-size: cover; box-shadow: inset -1px 0 0 rgba(0,0,0,.35); }

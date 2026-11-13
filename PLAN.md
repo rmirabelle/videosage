@@ -168,8 +168,8 @@ Each phase ends with a working app and a commit.
 
 1. **Shell (done).** Copy the conventions in section 3. `git init`. Result: an empty Video Sage window with splash, title bar, menu bar, About dialog, window state, single instance. `npm run build` and `cargo check` pass. Copy `installer.nsi` now.
 2. **Editor core (done).** `src/editor/` with Vitest tests for every operation, snap and history. No UI.
-3. **Import.** FFmpeg and ffprobe in place. Import dialog and drag-and-drop of files, probe, media list with thumbnails.
-4. **Timeline view.** Ruler, zoom, scroll, clips with strips, playhead, selection (click, Ctrl+click, box).
+3. **Import (done).** FFmpeg and ffprobe in place. Import dialog and drag-and-drop of files, probe, media list with thumbnails.
+4. **Timeline view (done).** Ruler, zoom, scroll, clips with strips, playhead, selection (click, Ctrl+click, box).
 5. **Timeline edit.** Drag with snap, trim handles, split, join, cut, copy, paste, delete, close gaps, undo, redo, menu items and shortcuts.
 6. **Preview.** Player with two video elements, transport controls, scrub, frame step, proxy files.
 7. **Project file.** New, Open, Save, Save As, "Save changes?" on close, recent files, a missing-media message with a relink command.

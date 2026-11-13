@@ -1,4 +1,4 @@
-import { CircleNotch, FilmStrip, Plus, SpeakerSlash, Warning, X } from "@phosphor-icons/react";
+import { ArrowLineDown, CircleNotch, FilmStrip, Plus, SpeakerSlash, Warning, X } from "@phosphor-icons/react";
 import { useEffect, useState } from "react";
 import type { MediaItem } from "../editor/model";
 import { formatDuration, formatFps, thumbnailUrl } from "../lib/media";
@@ -11,6 +11,8 @@ interface Props {
   dropActive: boolean;
   onImport: () => void;
   onRemove: (media: MediaItem) => void;
+  /** Puts the media file on the timeline, after the last clip. */
+  onAddToTimeline: (media: MediaItem) => void;
 }
 
 /** The picture of a media file; a film icon shows until the picture is ready, or if it cannot be made. */
@@ -30,7 +32,7 @@ function Thumbnail({ media }: { media: MediaItem }) {
 }
 
 /** The media list: the imported video files, with the Import button. */
-export function MediaBin({ media, importing, dropActive, onImport, onRemove }: Props) {
+export function MediaBin({ media, importing, dropActive, onImport, onRemove, onAddToTimeline }: Props) {
   const empty = media.length === 0 && importing.length === 0;
   return (
     <section className={`panel media-bin ${dropActive ? "drop-active" : ""}`} aria-label="Media">
@@ -49,7 +51,7 @@ export function MediaBin({ media, importing, dropActive, onImport, onRemove }: P
       ) : (
         <ul className="media-list">
           {media.map((item) => (
-            <li key={item.id} className="media-item">
+            <li key={item.id} className="media-item" onDoubleClick={() => onAddToTimeline(item)}>
               <Thumbnail media={item} />
               <div className="media-text">
                 <span className="media-name" title={item.path}>{item.name}</span>
@@ -59,9 +61,14 @@ export function MediaBin({ media, importing, dropActive, onImport, onRemove }: P
                   {!item.playable && <span className="warning" title="The preview player cannot play this file directly. Video Sage makes a preview copy of it."><Warning size={13} /> Needs a preview copy</span>}
                 </span>
               </div>
-              <button className="media-remove" onClick={() => onRemove(item)} aria-label={`Remove ${item.name}`} title="Remove from the project">
-                <X size={13} />
-              </button>
+              <div className="media-actions" onDoubleClick={(event) => event.stopPropagation()}>
+                <button onClick={() => onAddToTimeline(item)} aria-label={`Put ${item.name} on the timeline`} title="Put on the timeline, after the last clip">
+                  <ArrowLineDown size={13} />
+                </button>
+                <button className="media-remove" onClick={() => onRemove(item)} aria-label={`Remove ${item.name}`} title="Remove from the project">
+                  <X size={13} />
+                </button>
+              </div>
             </li>
           ))}
           {importing.map((name) => (
