@@ -399,3 +399,15 @@ button { border: 0; }
 .clip.selected .clip-name { background: var(--accent); }
 .clip-strip { height: 46px; position: relative; pointer-events: none; }
 .clip-tile { position: absolute; top: 0; bottom: 0; background-color: hsl(var(--clip-hue) 30% 18%); background-position: center; background-size: cover; box-shadow: inset -1px 0 0 rgba(0,0,0,.35); }
+
+/* The clip ends that trim, the clip in a drag, the snap line, and the toolbar's on state. */
+.clip-handle { position: absolute; top: 0; bottom: 0; width: 8px; max-width: 34%; cursor: ew-resize; }
+.clip-handle.start { left: 0; }
+.clip-handle.end { right: 0; }
+.clip:hover .clip-handle, .clip.selected .clip-handle { background: rgba(255,255,255,.28); }
+.clip-handle.start { border-radius: 5px 0 0 5px; }
+.clip-handle.end { border-radius: 0 5px 5px 0; }
+.clip.dragging { z-index: 3; opacity: .86; box-shadow: 0 6px 18px rgba(0,0,0,.55); }
+.timeline-snap-line { position: absolute; z-index: 4; top: 24px; bottom: 0; width: 1px; margin-left: -.5px; background: #ffd24a; box-shadow: 0 0 6px rgba(255,210,74,.8); pointer-events: none; }
+.timeline-tools button.on { color: #ffd24a; background: rgba(255,210,74,.12); }
+.timeline-tools-gap { width: 10px; }

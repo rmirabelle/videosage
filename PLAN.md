@@ -170,7 +170,7 @@ Each phase ends with a working app and a commit.
 2. **Editor core (done).** `src/editor/` with Vitest tests for every operation, snap and history. No UI.
 3. **Import (done).** FFmpeg and ffprobe in place. Import dialog and drag-and-drop of files, probe, media list with thumbnails.
 4. **Timeline view (done).** Ruler, zoom, scroll, clips with strips, playhead, selection (click, Ctrl+click, box).
-5. **Timeline edit.** Drag with snap, trim handles, split, join, cut, copy, paste, delete, close gaps, undo, redo, menu items and shortcuts.
+5. **Timeline edit (done).** Drag with snap, trim handles, split, join, cut, copy, paste, delete, close gaps, undo, redo, menu items and shortcuts.
 6. **Preview.** Player with two video elements, transport controls, scrub, frame step, proxy files.
 7. **Project file.** New, Open, Save, Save As, "Save changes?" on close, recent files, a missing-media message with a relink command.
 8. **Export.** Export dialog (size, frame rate, quality), progress, cancel.
