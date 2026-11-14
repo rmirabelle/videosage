@@ -29,6 +29,15 @@ export function thumbnailUrl(media: MediaItem): Promise<string> {
   return url;
 }
 
+/**
+ * The URL of a picture of a video file at a time, with the given width in
+ * pixels. The caller owns the URL, and releases it with URL.revokeObjectURL.
+ */
+export async function pictureUrl(path: string, atSec: number, width: number): Promise<string> {
+  const bytes = await invoke<ArrayBuffer>("media_thumbnail", { path, atSec, width });
+  return URL.createObjectURL(new Blob([bytes], { type: "image/jpeg" }));
+}
+
 /** The most FFmpeg runs for clip strip pictures at one time. */
 const FRAME_WORKERS = 4;
 /** The most strip pictures that wait for FFmpeg; older requests are dropped. */

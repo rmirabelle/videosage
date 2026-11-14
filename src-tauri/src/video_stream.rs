@@ -17,7 +17,7 @@ pub const CHUNK_BYTES: u64 = 2 * 1024 * 1024;
 /// The file types that the import accepts (the same list as VIDEO_EXTENSIONS in src/lib/media.ts).
 const VIDEO_EXTENSIONS: [&str; 14] = ["mp4", "m4v", "mov", "webm", "mkv", "avi", "wmv", "mpg", "mpeg", "ts", "mts", "m2ts", "flv", "3gp"];
 
-fn is_video_path(path: &Path) -> bool {
+pub fn is_video_path(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| VIDEO_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str()))

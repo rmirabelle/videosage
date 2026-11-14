@@ -1,3 +1,4 @@
+mod browse;
 mod export;
 mod media;
 mod project;
@@ -98,6 +99,11 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             log_frontend_error,
             cursor_position,
+            browse::list_browse_directory,
+            browse::browse_places,
+            browse::rename_browse_entry,
+            browse::delete_browse_entry,
+            browse::copy_browse_entry,
             media::probe_media,
             media::media_thumbnail,
             export::export_video,

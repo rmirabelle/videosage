@@ -11,6 +11,8 @@ use tauri::{path::BaseDirectory, AppHandle, Manager};
 
 /// The width of a media list picture, in pixels.
 const THUMBNAIL_WIDTH: u32 = 320;
+/// The largest width that a caller can ask for a picture, in pixels.
+const THUMBNAIL_WIDTH_LIMIT: u32 = 1920;
 
 /** The path of a bundled FFmpeg program ("ffmpeg.exe" or "ffprobe.exe"). */
 pub fn tool(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
@@ -180,7 +182,7 @@ pub async fn probe_media(app: AppHandle, path: String) -> Result<MediaInfo, Stri
 }
 
 /** The cache file name for a picture of a media file: it changes when the file or the time changes. */
-fn thumbnail_key(file: &Path, at_sec: f64) -> Result<String, String> {
+fn thumbnail_key(file: &Path, at_sec: f64, width: u32) -> Result<String, String> {
     let metadata = file.metadata().map_err(|error| format!("Could not read the file: {error}"))?;
     let mut key = DefaultHasher::new();
     "thumbnail-v1".hash(&mut key);
@@ -188,15 +190,22 @@ fn thumbnail_key(file: &Path, at_sec: f64) -> Result<String, String> {
     metadata.len().hash(&mut key);
     metadata.modified().ok().hash(&mut key);
     at_sec.to_bits().hash(&mut key);
+    /* Pictures of the usual width keep the keys that they had before a width could be given. */
+    if width != THUMBNAIL_WIDTH {
+        width.hash(&mut key);
+    }
     Ok(format!("{:016x}.jpg", key.finish()))
 }
 
 /**
  * Gives a small JPEG picture of a media file at a time, as raw bytes. The
  * picture is kept in the app's cache folder, so FFmpeg makes it only once.
+ * The width is that of the media list pictures when none is given.
  */
 #[tauri::command]
-pub async fn media_thumbnail(app: AppHandle, path: String, at_sec: f64) -> Result<tauri::ipc::Response, String> {
+pub async fn media_thumbnail(app: AppHandle, path: String, at_sec: f64, width: Option<u32>) -> Result<tauri::ipc::Response, String> {
+    /* An even width, which the JPEG encoder needs. */
+    let width = width.unwrap_or(THUMBNAIL_WIDTH).clamp(64, THUMBNAIL_WIDTH_LIMIT) / 2 * 2;
     let ffmpeg = tool(&app, "ffmpeg.exe")?;
     let cache = app
         .path()
@@ -207,14 +216,14 @@ pub async fn media_thumbnail(app: AppHandle, path: String, at_sec: f64) -> Resul
         let file = PathBuf::from(&path);
         let at_sec = if at_sec.is_finite() { at_sec.max(0.0) } else { 0.0 };
         std::fs::create_dir_all(&cache).map_err(|error| format!("Could not make the cache folder: {error}"))?;
-        let picture = cache.join(thumbnail_key(&file, at_sec)?);
+        let picture = cache.join(thumbnail_key(&file, at_sec, width)?);
         if !picture.is_file() {
             /* FFmpeg writes a part file first, so a stopped run leaves no broken picture. */
             let partial = picture.with_extension(format!("{}.part", std::process::id()));
             let output = quiet_command(&ffmpeg)
                 .args(["-v", "error", "-y", "-ss", &format!("{at_sec:.3}"), "-i"])
                 .arg(&file)
-                .args(["-frames:v", "1", "-vf", &format!("scale={THUMBNAIL_WIDTH}:-2"), "-q:v", "5", "-f", "mjpeg"])
+                .args(["-frames:v", "1", "-vf", &format!("scale={width}:-2"), "-q:v", "5", "-f", "mjpeg"])
                 .arg(&partial)
                 .output()
                 .map_err(|error| format!("Could not start FFmpeg: {error}"))?;

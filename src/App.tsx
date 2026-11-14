@@ -1,7 +1,7 @@
 import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { open, save } from "@tauri-apps/plugin-dialog";
+import { save } from "@tauri-apps/plugin-dialog";
 import { Check } from "@phosphor-icons/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AboutDialog } from "./components/AboutDialog";
@@ -10,6 +10,7 @@ import { ExportDialog } from "./components/ExportDialog";
 import { MediaBin } from "./components/MediaBin";
 import { MenuBar, type Menu } from "./components/MenuBar";
 import { Notices, type Notice } from "./components/Notices";
+import { OpenDialog, type OpenKind } from "./components/OpenDialog";
 import { Preview } from "./components/Preview";
 import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { Timeline, type TimelineHandle } from "./components/Timeline";
@@ -18,7 +19,7 @@ import { canRedo, canUndo, record, redo, startHistory, undo } from "./editor/his
 import { clipEnd, emptyProject, projectEnd, type ClipboardClip, type MediaItem, type Project } from "./editor/model";
 import { addMedia, canJoin, clipAt, closeGaps, copyClips, deleteClips, insertMedia, joinClips, pasteClips, relinkMedia, removeMedia, splitAt } from "./editor/operations";
 import { FILE_EXTENSION, parseProject, serializeProject } from "./editor/projectFile";
-import { probeMedia, VIDEO_EXTENSIONS } from "./lib/media";
+import { probeMedia } from "./lib/media";
 import { addRecentProject, missingFiles, readProjectFile, recentProjects, writeProjectFile } from "./lib/projects";
 import { revealMainWindow } from "./lib/splash";
 import { checkForUpdate, getAppVersion, type UpdateInfo } from "./lib/updater";
@@ -32,6 +33,16 @@ const NO_PATHS: ReadonlySet<string> = new Set();
 const PROJECT_FILTERS = [{ name: "Video Sage project", extensions: [FILE_EXTENSION] }];
 /** The most recent projects that the File menu shows. */
 const RECENT_IN_MENU = 5;
+
+/** What the app's Open dialog shows, and "done", which gets the chosen files (null when the user cancels). */
+interface Picker {
+  kind: OpenKind;
+  title: string;
+  hint?: string;
+  openLabel?: string;
+  multiple?: boolean;
+  done: (paths: string[] | null) => void;
+}
 
 const messageOf = (error: unknown) => error instanceof Error ? error.message : String(error);
 
@@ -74,6 +85,17 @@ export default function App() {
    * or chooses not to save; "cancel" runs when the user cancels.
    */
   const [asking, setAsking] = useState<{ then: () => void; cancel?: () => void } | null>(null);
+
+  /** The app's Open dialog is open (see pickFiles). */
+  const [picker, setPicker] = useState<Picker | null>(null);
+  const pickerRef = useRef(picker);
+  pickerRef.current = picker;
+
+  /** Opens the app's Open dialog. Gives the files that the user chose, or null when the user cancels. */
+  const pickFiles = useCallback((options: Omit<Picker, "done">) => {
+    if (!isTauri()) return Promise.resolve<string[] | null>(null);
+    return new Promise<string[] | null>((resolve) => setPicker({ ...options, done: resolve }));
+  }, []);
 
   const project = history.present;
   const dirty = project !== saved;
@@ -140,10 +162,9 @@ export default function App() {
   }, [edit, notify]);
 
   const importMedia = useCallback(async () => {
-    if (!isTauri()) return;
-    const picked = await open({ multiple: true, title: "Import Media", filters: [{ name: "Video files", extensions: VIDEO_EXTENSIONS }] });
-    if (picked) await importPaths(Array.isArray(picked) ? picked : [picked]);
-  }, [importPaths]);
+    const picked = await pickFiles({ kind: "video", title: "Import Media", hint: "Choose one or more video files. They go on the timeline after the last clip.", openLabel: "Import", multiple: true });
+    if (picked) await importPaths(picked);
+  }, [importPaths, pickFiles]);
 
   /** Puts a media file on the timeline after the last clip, and selects the new clip. */
   const addToTimeline = useCallback((item: MediaItem) => {
@@ -228,9 +249,8 @@ export default function App() {
   };
 
   const openProject = async () => {
-    if (!isTauri()) return;
-    const picked = await open({ multiple: false, title: "Open Project", filters: PROJECT_FILTERS });
-    if (typeof picked === "string") await openPath(picked);
+    const picked = await pickFiles({ kind: "project", title: "Open Project" });
+    if (picked) await openPath(picked[0]);
   };
 
   /**
@@ -238,9 +258,8 @@ export default function App() {
    * with their old names in the same folder are found too.
    */
   const relink = async (item: MediaItem) => {
-    if (!isTauri()) return;
-    const picked = await open({ multiple: false, title: `Find ${item.name}`, filters: [{ name: "Video files", extensions: VIDEO_EXTENSIONS }] });
-    if (typeof picked !== "string") return;
+    const picked = (await pickFiles({ kind: "video", title: `Find ${item.name}`, hint: "Choose the file that takes the place of the missing file.", openLabel: "Use This File" }))?.[0];
+    if (!picked) return;
     try {
       const found: [string, MediaItem][] = [[item.id, await probeMedia(picked)]];
       if (!relinkMedia(projectRef.current, item.id, found[0][1])) {
@@ -414,6 +433,8 @@ export default function App() {
   /* The keys. Each key is the same as its menu item (see also src/help/shortcuts.ts). */
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      /* The Open dialog has its own keys. */
+      if (pickerRef.current) return;
       if ((event.target as HTMLElement | null)?.closest("input, textarea")) return;
       const ctrl = event.ctrlKey && !event.shiftKey && !event.altKey;
       const ctrlShift = event.ctrlKey && event.shiftKey && !event.altKey;
@@ -577,6 +598,17 @@ export default function App() {
           missing={missing}
           suggestedPath={filePath ? filePath.replace(/\.[^.\\/]*$/, "") + ".mp4" : "Untitled Project.mp4"}
           onClose={() => setExportOpen(false)}
+        />
+      )}
+      {picker && (
+        <OpenDialog
+          kind={picker.kind}
+          title={picker.title}
+          hint={picker.hint}
+          openLabel={picker.openLabel}
+          multiple={picker.multiple}
+          onCancel={() => { setPicker(null); picker.done(null); }}
+          onOpen={(paths) => { setPicker(null); picker.done(paths); }}
         />
       )}
       {aboutOpen && <AboutDialog version={appVersion} initialUpdateInfo={startupUpdate} onClose={() => setAboutOpen(false)} beforeInstall={settleChanges} />}
