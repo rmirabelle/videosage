@@ -1,6 +1,7 @@
 # VideoSage repository instructions
 
-Video Sage is a simple linear video editor with one video track.
+Video Sage is a simple linear video editor with video layers (a higher layer
+shows on top; the sound of all layers plays).
 Tauri 2 + React + FFmpeg. `PLAN.md` holds the build plan and its phases.
 
 ## Layout

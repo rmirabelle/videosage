@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { exportSegments, sizeForHeight } from "./export";
+import { exportLayers, exportSegments, sizeForHeight } from "./export";
 import type { Clip, MediaItem, Project } from "./model";
 
 const media = (id: string, hasSound = true): MediaItem => ({ id, path: `C:\\Videos\\${id}.mp4`, name: `${id}.mp4`, durationSec: 10, fps: 30, width: 1920, height: 1080, hasSound, playable: true });
 
-const clip = (id: string, start: number, length: number, sourceIn = 0, mediaId = "a"): Clip => ({ id, mediaId, start, sourceIn, length });
+const clip = (id: string, start: number, length: number, sourceIn = 0, mediaId = "a", layer = 0): Clip => ({ id, mediaId, layer, start, sourceIn, length });
 
-const project = (...clips: Clip[]): Project => ({ version: 1, fps: 30, width: 1920, height: 1080, media: [media("a"), media("b", false)], clips });
+const project = (...clips: Clip[]): Project => ({ version: 2, fps: 30, width: 1920, height: 1080, media: [media("a"), media("b", false)], clips });
 
 describe("exportSegments", () => {
   it("gives the clips and the gaps in the sequence of the timeline", () => {
@@ -34,6 +34,21 @@ describe("exportSegments", () => {
 
   it("gives no segments for an empty timeline", () => {
     expect(exportSegments(project(), 30)).toEqual([]);
+  });
+});
+
+describe("exportLayers", () => {
+  it("gives each layer as long as the timeline, from the bottom up", () => {
+    const layers = exportLayers(project(clip("x", 0, 60), clip("y", 20, 10, 0, "b", 1)), 30);
+    expect(layers.map((layer) => layer.map((segment) => [segment.path !== null, segment.frames]))).toEqual([
+      [[true, 60]],
+      [[false, 20], [true, 10], [false, 30]]
+    ]);
+  });
+
+  it("leaves out an empty layer", () => {
+    expect(exportLayers(project(clip("x", 0, 60, 0, "a", 2)), 30)).toHaveLength(1);
+    expect(exportLayers(project(), 30)).toEqual([]);
   });
 });
 

@@ -1,6 +1,6 @@
 import { ArrowsOutLineHorizontal, MagnifyingGlassMinus, MagnifyingGlassPlus, Magnet, Scissors } from "@phosphor-icons/react";
 import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { clipEnd, projectEnd, type Clip, type MediaItem, type Project } from "../editor/model";
+import { clipEnd, layerCount, projectEnd, type Clip, type MediaItem, type Project } from "../editor/model";
 import { moveClips, trimEnd, trimStart } from "../editor/operations";
 import { rulerLabel, rulerSteps } from "../editor/ruler";
 import { findSnap, snapTargets } from "../editor/snap";
@@ -43,16 +43,20 @@ interface Props {
   onSplit: (() => void) | null;
   /** True during play: the view scrolls to keep the playhead on screen. */
   follow: boolean;
+  /** A right-click on a clip, at a point of the window. The clip is selected first. */
+  onClipMenu: (x: number, y: number) => void;
 }
 
 /** What a press on the track does until the pointer is released. */
 type Press =
-  | { kind: "box"; startX: number; startFrame: number; dragging: boolean; before: ReadonlySet<string> }
+  | { kind: "box"; startX: number; startY: number; startFrame: number; startLayer: number; dragging: boolean; before: ReadonlySet<string> }
   | {
     kind: "move" | "trimStart" | "trimEnd";
     clipId: string;
     startX: number;
     startFrame: number;
+    /** The layer under the pointer at the press. */
+    startLayer: number;
     dragging: boolean;
     ids: ReadonlySet<string>;
     /** True when a click with no drag must select only the pressed clip. */
@@ -137,20 +141,24 @@ const ClipView = memo(function ClipView({ clip, media, fps, zoom, selected, drag
 });
 
 /**
- * The timeline: a time ruler, one video track with the clips, and the
- * playhead. The wheel scrolls; Ctrl + wheel zooms at the pointer. A press on
- * the ruler moves the playhead. A click on a clip selects it (Ctrl + click
- * adds or removes it); a drag on the empty track selects the clips in a box.
- * A drag on a clip moves the selected clips; a drag on a clip's end trims it.
- * With snapping on, a dragged edge snaps to clip ends, the playhead and 0.
+ * The timeline: a time ruler, one row for each layer (the top layer at the
+ * top), an empty row above them for a new layer, and the playhead. The wheel
+ * scrolls; Shift + wheel scrolls up and down; Ctrl + wheel zooms at the
+ * pointer. A press on the ruler moves the playhead. A click on a clip selects
+ * it (Ctrl + click adds or removes it); a drag on an empty part selects the
+ * clips in a box. A drag on a clip moves the selected clips, also to another
+ * layer; a drag on a clip's end trims it. A double-click on a clip moves the
+ * playhead to the clip's start. With snapping on, a dragged edge snaps to
+ * clip ends, the playhead and 0.
  */
-export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline({ project: savedProject, playhead, onPlayhead, selection, onSelect, onCommit, snapping, onToggleSnapping, onSplit, follow }, ref) {
+export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline({ project: savedProject, playhead, onPlayhead, selection, onSelect, onCommit, snapping, onToggleSnapping, onSplit, follow, onClipMenu }, ref) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const [zoom, setZoom] = useState(DEFAULT_ZOOM);
   const [viewWidth, setViewWidth] = useState(0);
   const [scrollLeft, setScrollLeft] = useState(0);
-  const [box, setBox] = useState<{ from: number; to: number } | null>(null);
+  const [box, setBox] = useState<{ from: number; to: number; top: number; height: number } | null>(null);
+  const tracksRef = useRef<HTMLDivElement>(null);
   /** The project as a drag in progress makes it; it shows in place of the saved project until release. */
   const [draft, setDraft] = useState<Project | null>(null);
   const draftRef = useRef<Project | null>(null);
@@ -164,6 +172,12 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline({ pr
 
   const end = projectEnd(project);
   const mediaById = useMemo(() => new Map(project.media.map((item) => [item.id, item])), [project.media]);
+  /**
+   * The rows: one for each layer, and an empty row on top for a new layer.
+   * They come from the saved project, so a drag does not add a row under
+   * the pointer.
+   */
+  const rows = savedProject.clips.length > 0 ? layerCount(savedProject) + 1 : 1;
   /* Room after the last clip, so a clip can be put after the end. */
   const contentWidth = Math.max(viewWidth, end * zoom + viewWidth * 0.5);
 
@@ -237,6 +251,8 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline({ pr
       event.preventDefault();
       if (event.ctrlKey) {
         zoomTo(zoom * Math.exp(-event.deltaY * 0.0022), event.clientX - element.getBoundingClientRect().left);
+      } else if (event.shiftKey) {
+        element.scrollTop += event.deltaY;
       } else {
         element.scrollLeft += event.deltaX !== 0 ? event.deltaX : event.deltaY;
       }
@@ -252,6 +268,21 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline({ pr
     return (clientX - content.getBoundingClientRect().left) / zoom;
   }, [zoom]);
   const frameAt = useCallback((clientX: number) => Math.max(0, rawFrameAt(clientX)), [rawFrameAt]);
+
+  /** The layer of the row nearest to a pointer position. */
+  const layerAt = (clientY: number) => {
+    let best = 0;
+    let distance = Infinity;
+    for (const row of tracksRef.current?.querySelectorAll<HTMLElement>("[data-layer]") ?? []) {
+      const bounds = row.getBoundingClientRect();
+      const away = clientY < bounds.top ? bounds.top - clientY : clientY > bounds.bottom ? clientY - bounds.bottom : 0;
+      if (away < distance) {
+        distance = away;
+        best = Number(row.dataset.layer);
+      }
+    }
+    return best;
+  };
 
   /* A press on the ruler moves the playhead, and it follows the pointer until release. */
   const onRulerPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -298,7 +329,7 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline({ pr
     const startX = event.clientX;
     if (!clipId) {
       event.currentTarget.setPointerCapture(event.pointerId);
-      press.current = { kind: "box", startX, startFrame: frameAt(startX), dragging: false, before: event.ctrlKey ? selection : new Set() };
+      press.current = { kind: "box", startX, startY: event.clientY, startFrame: frameAt(startX), startLayer: layerAt(event.clientY), dragging: false, before: event.ctrlKey ? selection : new Set() };
       return;
     }
     if (event.ctrlKey) {
@@ -322,6 +353,7 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline({ pr
       clipId,
       startX,
       startFrame: rawFrameAt(startX),
+      startLayer: layerAt(event.clientY),
       dragging: false,
       ids,
       selectOnClick
@@ -331,7 +363,10 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline({ pr
   const onTrackPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
     const current = press.current;
     if (!current) return;
-    if (!current.dragging && Math.abs(event.clientX - current.startX) < DRAG_THRESHOLD) return;
+    const startY = current.kind === "box" ? current.startY : null;
+    const layerMoved = current.kind === "move" && layerAt(event.clientY) !== current.startLayer;
+    if (!current.dragging && Math.abs(event.clientX - current.startX) < DRAG_THRESHOLD
+      && !layerMoved && (startY === null || Math.abs(event.clientY - startY) < DRAG_THRESHOLD)) return;
     current.dragging = true;
 
     /* Near a side of the view, the view scrolls, so a drag can go past what is on screen. */
@@ -345,10 +380,13 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline({ pr
     if (current.kind === "box") {
       const from = Math.min(current.startFrame, frameAt(event.clientX));
       const to = Math.max(current.startFrame, frameAt(event.clientX));
-      setBox({ from, to });
+      const top = tracksRef.current?.getBoundingClientRect().top ?? 0;
+      setBox({ from, to, top: Math.min(current.startY, event.clientY) - top, height: Math.abs(event.clientY - current.startY) });
+      const layerA = current.startLayer;
+      const layerB = layerAt(event.clientY);
       const next = new Set(current.before);
       for (const clip of savedProject.clips) {
-        if (clip.start < to && clipEnd(clip) > from) next.add(clip.id);
+        if (clip.start < to && clipEnd(clip) > from && clip.layer >= Math.min(layerA, layerB) && clip.layer <= Math.max(layerA, layerB)) next.add(clip.id);
       }
       onSelect(next);
       return;
@@ -365,7 +403,7 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline({ pr
       const moving = savedProject.clips.filter((clip) => current.ids.has(clip.id));
       const snap = findSnap(moving.flatMap((clip) => [clip.start + delta, clipEnd(clip) + delta]), targets, range);
       const wanted = delta + (snap?.adjust ?? 0);
-      next = moveClips(savedProject, current.ids, wanted);
+      next = moveClips(savedProject, current.ids, wanted, layerAt(event.clientY) - current.startLayer);
       /* The line shows only when the clips are really at the snapped place (a full place moves them on). */
       const moved = next.clips.find((clip) => clip.id === pressed.id);
       if (snap && moved && moved.start === pressed.start + wanted) line = snap.target;
@@ -384,6 +422,21 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline({ pr
     setDraft(next === savedProject ? null : next);
     setDraggingIds(current.ids);
     setSnapLine(line);
+  };
+
+  /** A right-click on a clip selects it (unless it is in the selection) and opens the clip menu. */
+  const onTrackContextMenu = (event: React.MouseEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const clipId = (event.target as HTMLElement).closest<HTMLElement>("[data-clip-id]")?.dataset.clipId;
+    if (!clipId || press.current?.dragging) return;
+    if (!selection.has(clipId)) onSelect(new Set([clipId]));
+    onClipMenu(event.clientX, event.clientY);
+  };
+
+  const onTrackDoubleClick = (event: React.MouseEvent<HTMLDivElement>) => {
+    const clipId = (event.target as HTMLElement).closest<HTMLElement>("[data-clip-id]")?.dataset.clipId;
+    const clip = savedProject.clips.find((item) => item.id === clipId);
+    if (clip) onPlayhead(clip.start);
   };
 
   const onTrackPointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -443,22 +496,40 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline({ pr
               </div>
             ))}
           </div>
-          <div className="timeline-track" onPointerDown={onTrackPointerDown} onPointerMove={onTrackPointerMove} onPointerUp={onTrackPointerUp} onPointerCancel={onTrackPointerUp}>
-            {project.clips.length === 0 && <p className="timeline-empty">Import a video to put it on the timeline.</p>}
-            {project.clips.map((clip) => (
-              <ClipView
-                key={clip.id}
-                clip={clip}
-                media={mediaById.get(clip.mediaId)}
-                fps={project.fps}
-                zoom={zoom}
-                selected={selection.has(clip.id)}
-                dragging={draggingIds?.has(clip.id) ?? false}
-                viewLeft={viewLeft}
-                viewRight={viewRight}
-              />
-            ))}
-            {box && <div className="timeline-box" style={{ left: box.from * zoom, width: (box.to - box.from) * zoom }} />}
+          <div
+            className="timeline-tracks"
+            ref={tracksRef}
+            onPointerDown={onTrackPointerDown}
+            onPointerMove={onTrackPointerMove}
+            onPointerUp={onTrackPointerUp}
+            onPointerCancel={onTrackPointerUp}
+            onContextMenu={onTrackContextMenu}
+            onDoubleClick={onTrackDoubleClick}
+          >
+            {Array.from({ length: rows }, (_, row) => {
+              const layer = rows - 1 - row;
+              const fresh = rows > 1 && row === 0;
+              return (
+                <div key={layer} className={`timeline-track ${fresh ? "new-layer" : ""}`} data-layer={layer}>
+                  {rows > 1 && <span className="timeline-layer-label">{fresh ? "New layer: drag a clip here" : `Layer ${layer + 1}`}</span>}
+                  {project.clips.length === 0 && <p className="timeline-empty">Import a video to put it on the timeline.</p>}
+                  {project.clips.filter((clip) => clip.layer === layer).map((clip) => (
+                    <ClipView
+                      key={clip.id}
+                      clip={clip}
+                      media={mediaById.get(clip.mediaId)}
+                      fps={project.fps}
+                      zoom={zoom}
+                      selected={selection.has(clip.id)}
+                      dragging={draggingIds?.has(clip.id) ?? false}
+                      viewLeft={viewLeft}
+                      viewRight={viewRight}
+                    />
+                  ))}
+                </div>
+              );
+            })}
+            {box && <div className="timeline-box" style={{ left: box.from * zoom, width: (box.to - box.from) * zoom, top: box.top, height: box.height }} />}
           </div>
           {snapLine !== null && <div className="timeline-snap-line" style={{ left: snapLine * zoom }} />}
           <div className="timeline-playhead" style={{ left: playhead * zoom }} />

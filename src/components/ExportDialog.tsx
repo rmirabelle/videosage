@@ -1,7 +1,7 @@
 import { save } from "@tauri-apps/plugin-dialog";
 import { CheckCircle, CircleNotch, Export, FolderOpen, WarningCircle, X } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
-import { exportSegments, sizeForHeight } from "../editor/export";
+import { exportLayers, sizeForHeight } from "../editor/export";
 import { projectEnd, type Project } from "../editor/model";
 import { cancelExport, EXPORT_CANCELLED, exportVideo, onExportProgress, showInFolder, type ExportQuality } from "../lib/export";
 import { formatDuration, formatFps } from "../lib/media";
@@ -12,6 +12,8 @@ interface Props {
   missing: ReadonlySet<string>;
   /** The file that the save dialog shows first, for example "C:\Videos\My Project.mp4". */
   suggestedPath: string;
+  /** True when "project" holds only the selected clips: the dialog says so. */
+  selection?: boolean;
   onClose: () => void;
 }
 
@@ -30,7 +32,7 @@ const fileName = (path: string) => path.split(/[\\/]/).pop() ?? path;
  * and chooses the file. Then the dialog shows how far the export is, with a
  * button to stop it. The dialog cannot close while the export runs.
  */
-export function ExportDialog({ project, missing, suggestedPath, onClose }: Props) {
+export function ExportDialog({ project, missing, suggestedPath, selection = false, onClose }: Props) {
   const [state, setState] = useState<State>({ kind: "settings" });
   const [height, setHeight] = useState(project.height);
   const [fps, setFps] = useState(project.fps);
@@ -62,11 +64,11 @@ export function ExportDialog({ project, missing, suggestedPath, onClose }: Props
   }, []);
 
   const start = async () => {
-    const output = await save({ title: "Export Video", defaultPath: suggestedPath, filters: [{ name: "MP4 video", extensions: ["mp4"] }] });
+    const output = await save({ title: selection ? "Export Selection" : "Export Video", defaultPath: suggestedPath, filters: [{ name: "MP4 video", extensions: ["mp4"] }] });
     if (!output) return;
     setState({ kind: "running", output, fraction: 0, stopping: false });
     try {
-      await exportVideo({ output, width: size.width, height: size.height, fps, quality, segments: exportSegments(project, fps) });
+      await exportVideo({ output, width: size.width, height: size.height, fps, quality, layers: exportLayers(project, fps) });
       setState({ kind: "done", output });
     } catch (error) {
       const message = String(error);
@@ -87,10 +89,10 @@ export function ExportDialog({ project, missing, suggestedPath, onClose }: Props
       <div className="about-dialog confirm-dialog export-dialog" role="dialog" aria-modal="true" aria-labelledby="export-title">
         {!running && <button className="about-dialog-close" onClick={onClose} aria-label="Close" data-tip="Close `Esc`"><X size={18} /></button>}
         <div className="confirm-dialog-content">
-          <h2 id="export-title">Export Video</h2>
+          <h2 id="export-title">{selection ? "Export Selection" : "Export Video"}</h2>
           {state.kind === "settings" && (
             <>
-              <p>The export makes one MP4 file (H.264 video, AAC sound) of the timeline, {formatDuration(projectEnd(project) / project.fps)} long.</p>
+              <p>The export makes one MP4 file (H.264 video, AAC sound) of {selection ? "the selected clips" : "the timeline"}, {formatDuration(projectEnd(project) / project.fps)} long.</p>
               <div className="export-fields">
                 <label htmlFor="export-size">Size</label>
                 <select id="export-size" value={height} onChange={(event) => setHeight(Number(event.target.value))}>

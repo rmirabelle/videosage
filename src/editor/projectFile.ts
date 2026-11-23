@@ -5,11 +5,12 @@ import { clipEnd, type Clip, type MediaItem, type Project } from "./model";
  * paths of the media files, not the videos.
  */
 
-export const FILE_VERSION = 1;
+/** Version 2 adds layers. A version 1 file has all its clips on layer 0. */
+export const FILE_VERSION = 2;
 export const FILE_EXTENSION = "vsage";
 
 export function serializeProject(project: Project): string {
-  return JSON.stringify({ app: "Video Sage", ...project }, null, 2);
+  return JSON.stringify({ app: "Video Sage", ...project, version: FILE_VERSION }, null, 2);
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
@@ -35,11 +36,12 @@ function readMedia(value: unknown): MediaItem {
 
 function readClip(value: unknown, mediaIds: Set<string>): Clip {
   if (!isRecord(value) || typeof value.id !== "string" || typeof value.mediaId !== "string"
+    || (value.layer !== undefined && (!isWhole(value.layer) || value.layer < 0))
     || !isWhole(value.start) || value.start < 0 || !isWhole(value.sourceIn) || value.sourceIn < 0 || !isWhole(value.length) || value.length < 1) {
     throw new Error("The project file has a clip that is not correct.");
   }
   if (!mediaIds.has(value.mediaId)) throw new Error("The project file has a clip with no media file.");
-  return { id: value.id, mediaId: value.mediaId, start: value.start, sourceIn: value.sourceIn, length: value.length };
+  return { id: value.id, mediaId: value.mediaId, layer: typeof value.layer === "number" ? value.layer : 0, start: value.start, sourceIn: value.sourceIn, length: value.length };
 }
 
 /** Reads the text of a .vsage file. Throws an Error with a message for the user when the text is not a correct project. */
@@ -57,9 +59,11 @@ export function parseProject(text: string): Project {
   if (!isPositive(data.fps) || !isPositive(data.width) || !isPositive(data.height)) throw new Error("The project file has settings that are not correct.");
   const media = data.media.map(readMedia);
   const mediaIds = new Set(media.map((item) => item.id));
-  const clips = data.clips.map((clip) => readClip(clip, mediaIds)).sort((a, b) => a.start - b.start);
-  for (let index = 1; index < clips.length; index++) {
-    if (clips[index].start < clipEnd(clips[index - 1])) throw new Error("The project file has clips that overlap.");
+  const clips = data.clips.map((clip) => readClip(clip, mediaIds)).sort((a, b) => a.start - b.start || a.layer - b.layer);
+  const layerEnds = new Map<number, number>();
+  for (const clip of clips) {
+    if (clip.start < (layerEnds.get(clip.layer) ?? 0)) throw new Error("The project file has clips that overlap.");
+    layerEnds.set(clip.layer, clipEnd(clip));
   }
-  return { version: 1, fps: data.fps, width: data.width, height: data.height, media, clips };
+  return { version: FILE_VERSION, fps: data.fps, width: data.width, height: data.height, media, clips };
 }

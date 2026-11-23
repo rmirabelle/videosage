@@ -9,13 +9,16 @@ It's focused and simple. Basic timeline. clip editing (split, join, drag, snap t
 ## What it does
 
 - Import video files (MP4, MOV, MKV, WebM, AVI and more).
-- Put clips on one video track. Each clip keeps its own sound.
+- Put clips on layers. A clip on a higher layer shows on top of the layers under it.
+  Each clip keeps its own sound, and the sound of all layers plays.
+- When the timeline has clips, each new import goes on a new layer at the playhead.
 - Split, join, move and trim clips. Cut, copy, paste and delete them.
 - Snap a clip to other clips, to the playhead and to the start.
-- Play the timeline in the preview, with frame steps.
+- Play the timeline in the preview, with frame steps (hold Shift or Ctrl for larger steps).
+- Loop play the selected clips, or the whole timeline.
 - Undo and redo every edit.
 - Save the project as a `.vsage` file. The file holds the paths of the videos, not the videos.
-- Export the timeline to one MP4 file (H.264 video, AAC sound).
+- Export the timeline, or only the selected clips (right-click a clip), to one MP4 file (H.264 video, AAC sound).
 
 Press `?` in the app for the list of keys.
 

@@ -21,6 +21,7 @@ export const SHORTCUT_GROUPS: readonly ShortcutGroup[] = [
     shortcuts: [
       { keys: ["Ctrl+N"], does: "New project" },
       { keys: ["Ctrl+O"], does: "Open a project" },
+      { keys: ["Ctrl+W"], does: "Close the project" },
       { keys: ["Ctrl+S"], does: "Save the project" },
       { keys: ["Ctrl+Shift+S"], does: "Save the project as" },
       { keys: ["Ctrl+I"], does: "Import media" },
@@ -37,7 +38,7 @@ export const SHORTCUT_GROUPS: readonly ShortcutGroup[] = [
       { keys: ["Ctrl+V"], does: "Paste at the playhead" },
       { keys: ["Delete"], does: "Delete the selected clips" },
       { keys: ["Ctrl+A"], does: "Select all clips" },
-      { keys: ["S"], does: "Split the clip at the playhead" },
+      { keys: ["S"], does: "Split at the playhead (the selected clips, or all clips there)" },
       { keys: ["Ctrl+J"], does: "Join the selected clips" }
     ]
   },
@@ -45,8 +46,13 @@ export const SHORTCUT_GROUPS: readonly ShortcutGroup[] = [
     title: "Playback",
     shortcuts: [
       { keys: ["Space"], does: "Play or pause" },
+      { keys: ["L"], does: "Turn loop play on or off (the selected clips, or the timeline)" },
       { keys: ["Left", "Right"], does: "Go one frame back or forward" },
-      { keys: ["Home", "End"], does: "Go to the start or the end" }
+      { keys: ["Shift+Left", "Shift+Right"], does: "Go 10 frames back or forward" },
+      { keys: ["Ctrl+Left", "Ctrl+Right"], does: "Go one second back or forward" },
+      { keys: ["Ctrl+Shift+Left", "Ctrl+Shift+Right"], does: "Go 10 seconds back or forward" },
+      { keys: ["Home", "End"], does: "Go to the start or the end" },
+      { keys: ["Shift+Home"], does: "Go to the start of the selected clips" }
     ]
   },
   {

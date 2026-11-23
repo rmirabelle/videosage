@@ -381,15 +381,20 @@ button { border: 0; }
 .timeline-tools button { width: 28px; height: 26px; display: grid; place-items: center; border-radius: 5px; color: #b9bdc8; background: transparent; cursor: pointer; }
 .timeline-tools button:hover:not(:disabled) { color: #fff; background: rgba(255,255,255,.08); }
 .timeline-tools button:disabled { opacity: .4; cursor: default; }
-.timeline-scroll { flex: 1; min-height: 0; overflow-x: auto; overflow-y: hidden; background: #16181f; scrollbar-color: #474c5e #16181f; }
+.timeline-scroll { flex: 1; min-height: 0; overflow: auto; background: #16181f; scrollbar-color: #474c5e #16181f; }
 .timeline-content { position: relative; min-height: 100%; }
-.timeline-ruler { height: 24px; position: relative; overflow: hidden; border-bottom: 1px solid #2c303b; background: #1a1d25; cursor: ew-resize; }
+.timeline-ruler { height: 24px; position: sticky; top: 0; z-index: 6; overflow: hidden; border-bottom: 1px solid #2c303b; background: #1a1d25; cursor: ew-resize; }
 .ruler-mark { position: absolute; bottom: 0; width: 1px; height: 5px; background: #3f4454; pointer-events: none; }
 .ruler-mark.major { height: 10px; background: #626a7d; }
 .ruler-mark span { position: absolute; bottom: 9px; left: 4px; color: #8c91a1; font-size: 10px; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.timeline-track { height: 72px; position: relative; margin-top: 8px; background: #1d2029; border-top: 1px solid #262a35; border-bottom: 1px solid #262a35; }
+.timeline-tracks { position: relative; padding: 4px 0 8px; }
+.timeline-track { height: 72px; position: relative; margin-top: 4px; background: #1d2029; border-top: 1px solid #262a35; border-bottom: 1px solid #262a35; }
 .timeline-empty { position: sticky; left: 0; width: max-content; margin: 0; padding: 27px 16px; color: #5d6272; font-size: 12px; pointer-events: none; }
-.timeline-box { position: absolute; top: 0; bottom: 0; border: 1px solid var(--accent); background: rgba(75,118,247,.16); pointer-events: none; }
+/* Each row has its layer's name at the left side of the view, under the clips. */
+.timeline-layer-label { position: sticky; left: 0; display: inline-block; padding: 4px 8px; color: #4d5262; font-size: 10.5px; pointer-events: none; white-space: nowrap; }
+.timeline-track.new-layer { height: 30px; background: transparent; border-style: dashed; border-color: #2c303b; }
+.timeline-track.new-layer .timeline-layer-label { padding-top: 7px; }
+.timeline-box { position: absolute; z-index: 4; border: 1px solid var(--accent); background: rgba(75,118,247,.16); pointer-events: none; }
 .timeline-playhead { position: absolute; z-index: 5; top: 0; bottom: 0; width: 1px; margin-left: -.5px; background: #ff5c5c; pointer-events: none; }
 .timeline-playhead::before { content: ""; position: absolute; top: 0; left: -5px; border: 5.5px solid transparent; border-top: 8px solid #ff5c5c; }
 
@@ -442,7 +447,8 @@ button { border: 0; }
 .transport { flex: 0 0 44px; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; padding: 0 12px; border-top: 1px solid #262a35; background: var(--panel); }
 .transport-time { color: #e4e6ec; font-size: 13px; font-variant-numeric: tabular-nums; }
 .transport-buttons { display: flex; align-items: center; gap: 4px; }
-.transport-right { display: flex; justify-content: flex-end; }
+.transport-right { display: flex; justify-content: flex-end; gap: 2px; }
+.transport button.on { color: #ffd24a; background: rgba(255,210,74,.12); }
 .transport button { width: 32px; height: 30px; display: grid; place-items: center; border-radius: 6px; color: #c3c7d0; background: transparent; cursor: pointer; }
 .transport button:hover:not(:disabled) { color: #fff; background: rgba(255,255,255,.08); }
 .transport button:disabled { opacity: .35; cursor: default; }
@@ -814,6 +820,10 @@ button { border: 0; }
 .open-context-menu button:hover svg { color: var(--secondary); }
 .open-context-menu button.danger:hover { color: #fecaca; background: rgba(248,113,113,.14); }
 .open-context-menu button.danger:hover svg { color: #f87171; }
+.open-context-menu hr { height: 1px; margin: 4px 6px; border: 0; background: #3c4150; }
+.open-context-menu button:disabled { opacity: .4; cursor: default; }
+.open-context-menu button:disabled:hover { color: #d4d7df; background: transparent; }
+.open-context-menu button:disabled:hover svg { color: #9ba0ae; }
 .open-list-empty {
   display: flex;
   align-items: center;

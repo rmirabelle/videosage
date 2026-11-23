@@ -26,11 +26,11 @@ const CANCELLED_TEXT: &str = "cancelled";
 /// Windows permits about 32,000 characters in one command.
 const COMMAND_LIMIT: usize = 30_000;
 
-/** One part of the timeline, in the sequence of the timeline: a part of a video file, or a gap. */
+/** One part of a layer, in the sequence of the timeline: a part of a video file, or a gap. */
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Segment {
-    /// The video file; none for a gap, which is black with no sound.
+    /// The video file; none for a gap, which has no sound and shows the layers under it (black on layer 0).
     pub path: Option<String>,
     /// Where the part starts in the video file, in seconds.
     pub start_sec: f64,
@@ -48,7 +48,20 @@ pub struct ExportRequest {
     pub fps: f64,
     /// "standard" or "high".
     pub quality: String,
-    pub segments: Vec<Segment>,
+    /// The layers from the bottom up. Each layer is as long as the timeline.
+    pub layers: Vec<Vec<Segment>>,
+}
+
+impl ExportRequest {
+    /** All segments of all layers, from the bottom layer up. The inputs of FFmpeg are in this sequence. */
+    fn segments(&self) -> impl Iterator<Item = &Segment> {
+        self.layers.iter().flatten()
+    }
+
+    /** The length of the export, in frames: the longest layer. */
+    fn frames(&self) -> u64 {
+        self.layers.iter().map(|layer| layer.iter().map(|segment| segment.frames).sum::<u64>()).max().unwrap_or(0)
+    }
 }
 
 /** A frame rate as FFmpeg text. The TV rates (29.97 and so on) are written as exact fractions. */
@@ -68,42 +81,68 @@ fn rate_text(fps: f64) -> String {
 /**
  * The FFmpeg filter graph of the export. Each segment becomes one video
  * stream and one sound stream with the same exact length, and "concat" puts
- * them one after the other. A clip is scaled into the frame with black bars,
- * and gets the frame rate of the export. If a file ends too early, its last
- * frame holds and its sound is silent, so later clips stay in their places.
+ * the segments of a layer one after the other. A clip is scaled into the
+ * frame and gets the frame rate of the export. If a file ends too early, its
+ * last frame holds and its sound is silent, so later clips stay in their
+ * places. On layer 0 the bars around a clip and the gaps are black. On a
+ * higher layer they are transparent, and the layer goes over the layers
+ * under it; the sound of all layers is mixed.
  */
 fn build_graph(request: &ExportRequest) -> String {
     let (width, height) = (request.width, request.height);
     let rate = rate_text(request.fps);
     let mut parts = Vec::new();
-    let mut labels = String::new();
     let mut input = 0;
-    for (index, segment) in request.segments.iter().enumerate() {
-        let frames = segment.frames;
-        let seconds = frames as f64 / request.fps;
-        let silence = format!("anullsrc=r=48000:cl=stereo,atrim=end={seconds:.6},aformat=sample_fmts=fltp[a{index}]");
-        if segment.path.is_some() {
-            parts.push(format!(
-                "[{input}:v:0]fps={rate},scale={width}:{height}:force_original_aspect_ratio=decrease:flags=lanczos,\
-                 pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,format=yuv420p,\
-                 tpad=stop_mode=clone:stop=-1,trim=end_frame={frames},setpts=PTS-STARTPTS[v{index}]"
-            ));
-            if segment.has_sound {
+    let mut index = 0;
+    let single = request.layers.len() == 1;
+    for (layer, segments) in request.layers.iter().enumerate() {
+        /* A higher layer keeps an alpha channel, so its gaps and bars show the layers under it. */
+        let (format, fill) = if layer == 0 { ("yuv420p", "black") } else { ("yuva420p", "black@0") };
+        let mut labels = String::new();
+        for segment in segments {
+            let frames = segment.frames;
+            let seconds = frames as f64 / request.fps;
+            let silence = format!("anullsrc=r=48000:cl=stereo,atrim=end={seconds:.6},aformat=sample_fmts=fltp[a{index}]");
+            if segment.path.is_some() {
+                let pad = if layer == 0 {
+                    format!("pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,format=yuv420p")
+                } else {
+                    format!("format=yuva420p,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:{fill},setsar=1")
+                };
                 parts.push(format!(
-                    "[{input}:a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,\
-                     apad,atrim=end={seconds:.6},asetpts=PTS-STARTPTS[a{index}]"
+                    "[{input}:v:0]fps={rate},scale={width}:{height}:force_original_aspect_ratio=decrease:flags=lanczos,\
+                     {pad},tpad=stop_mode=clone:stop=-1,trim=end_frame={frames},setpts=PTS-STARTPTS[v{index}]"
                 ));
+                if segment.has_sound {
+                    parts.push(format!(
+                        "[{input}:a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,\
+                         apad,atrim=end={seconds:.6},asetpts=PTS-STARTPTS[a{index}]"
+                    ));
+                } else {
+                    parts.push(silence);
+                }
+                input += 1;
             } else {
+                parts.push(format!("color=c={fill}:s={width}x{height}:r={rate},format={format},setsar=1,trim=end_frame={frames}[v{index}]"));
                 parts.push(silence);
             }
-            input += 1;
-        } else {
-            parts.push(format!("color=c=black:s={width}x{height}:r={rate},format=yuv420p,setsar=1,trim=end_frame={frames}[v{index}]"));
-            parts.push(silence);
+            labels.push_str(&format!("[v{index}][a{index}]"));
+            index += 1;
         }
-        labels.push_str(&format!("[v{index}][a{index}]"));
+        let (video, sound) = if single { ("v".to_string(), "a".to_string()) } else { (format!("lv{layer}"), format!("la{layer}")) };
+        parts.push(format!("{labels}concat=n={}:v=1:a=1[{video}][{sound}]", segments.len()));
     }
-    parts.push(format!("{labels}concat=n={}:v=1:a=1[v][a]", request.segments.len()));
+    if !single {
+        let mut below = "lv0".to_string();
+        for layer in 1..request.layers.len() {
+            let out = if layer + 1 == request.layers.len() { "over".to_string() } else { format!("o{layer}") };
+            parts.push(format!("[{below}][lv{layer}]overlay=format=auto:eof_action=pass[{out}]"));
+            below = out;
+        }
+        parts.push("[over]format=yuv420p[v]".into());
+        let sounds: String = (0..request.layers.len()).map(|layer| format!("[la{layer}]")).collect();
+        parts.push(format!("{sounds}amix=inputs={}:normalize=0:duration=longest[a]", request.layers.len()));
+    }
     parts.join(";\n")
 }
 
@@ -141,7 +180,7 @@ fn gpu_can_encode(ffmpeg: &Path, request: &ExportRequest, args: &[String]) -> bo
 /** The full FFmpeg command: one input for each clip segment, the filter graph from a file, and the encoders. */
 fn build_args(request: &ExportRequest, graph_file: &Path, encoder: &[String], output: &Path) -> Vec<OsString> {
     let mut args: Vec<OsString> = ["-v", "error", "-nostats", "-y"].map(OsString::from).to_vec();
-    for segment in &request.segments {
+    for segment in request.segments() {
         let Some(path) = &segment.path else { continue };
         /* FFmpeg reads one second more than the segment, and the graph cuts the exact length. */
         let seconds = segment.frames as f64 / request.fps + 1.0;
@@ -161,7 +200,7 @@ fn progress_seconds(line: &str) -> Option<f64> {
 }
 
 fn check(request: &ExportRequest) -> Result<(), String> {
-    if request.segments.iter().all(|segment| segment.frames == 0) {
+    if request.layers.is_empty() || request.segments().all(|segment| segment.frames == 0) {
         return Err("The timeline is empty.".into());
     }
     if request.width < 2 || request.height < 2 || request.width % 2 != 0 || request.height % 2 != 0 {
@@ -170,7 +209,7 @@ fn check(request: &ExportRequest) -> Result<(), String> {
     if !(request.fps.is_finite() && (1.0..=240.0).contains(&request.fps)) {
         return Err("The frame rate is not correct.".into());
     }
-    for path in request.segments.iter().filter_map(|segment| segment.path.as_deref()) {
+    for path in request.segments().filter_map(|segment| segment.path.as_deref()) {
         if !Path::new(path).is_file() {
             return Err(format!("The video file was not found: {path}"));
         }
@@ -252,7 +291,7 @@ fn export_parts(ffmpeg: &Path, request: &ExportRequest, work_folder: &Path, prog
     let mut part = output.as_os_str().to_owned();
     part.push(".part");
     let part = PathBuf::from(part);
-    let total_sec = request.segments.iter().map(|segment| segment.frames).sum::<u64>() as f64 / request.fps;
+    let total_sec = request.frames() as f64 / request.fps;
 
     let gpu_args = encoder_args(&request.quality, request.fps, true)?;
     let mut encoders = vec![encoder_args(&request.quality, request.fps, false)?];
@@ -337,7 +376,11 @@ mod tests {
     }
 
     fn request(segments: Vec<Segment>) -> ExportRequest {
-        ExportRequest { output: "C:\\out.mp4".into(), width: 1280, height: 720, fps: 30.0, quality: "standard".into(), segments }
+        layered(vec![segments])
+    }
+
+    fn layered(layers: Vec<Vec<Segment>>) -> ExportRequest {
+        ExportRequest { output: "C:\\out.mp4".into(), width: 1280, height: 720, fps: 30.0, quality: "standard".into(), layers }
     }
 
     #[test]
@@ -364,6 +407,20 @@ mod tests {
         assert!(!graph.contains("[1:a:0]"));
         assert!(graph.contains("atrim=end=1.500000,aformat=sample_fmts=fltp[a2]"));
         assert!(graph.ends_with("[v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1[v][a]"));
+    }
+
+    #[test]
+    fn a_higher_layer_goes_over_the_layer_under_it() {
+        let graph = build_graph(&layered(vec![vec![clip("a.mp4", 0.0, 60, true)], vec![gap(20), clip("b.mp4", 0.0, 40, true)]]));
+        /* The gap and the bars of layer 1 are transparent. */
+        assert!(graph.contains("color=c=black@0:s=1280x720:r=30,format=yuva420p,setsar=1,trim=end_frame=20[v1]"));
+        assert!(graph.contains("[1:v:0]fps=30,"));
+        assert!(graph.contains("format=yuva420p,pad=1280:720:(ow-iw)/2:(oh-ih)/2:black@0,setsar=1"));
+        assert!(graph.contains("[v0][a0]concat=n=1:v=1:a=1[lv0][la0]"));
+        assert!(graph.contains("[v1][a1][v2][a2]concat=n=2:v=1:a=1[lv1][la1]"));
+        assert!(graph.contains("[lv0][lv1]overlay=format=auto:eof_action=pass[over]"));
+        assert!(graph.contains("[over]format=yuv420p[v]"));
+        assert!(graph.ends_with("[la0][la1]amix=inputs=2:normalize=0:duration=longest[a]"));
     }
 
     #[test]
@@ -437,13 +494,13 @@ mod tests {
             height: 360,
             fps: 30.0,
             quality: "standard".into(),
-            segments: vec![
+            layers: vec![vec![
                 gap(15),
                 clip(&wide.to_string_lossy(), 1.0, 45, true),
                 clip(&tall.to_string_lossy(), 0.5, 30, false),
                 /* This part goes past the end of its file: the last frame holds. */
                 clip(&wide.to_string_lossy(), 2.5, 30, true),
-            ],
+            ]],
         };
         let last = Mutex::new(0.0);
         run_export(&real("ffmpeg.exe"), &request, folder.path(), &|fraction| *last.lock().unwrap() = fraction).unwrap();
@@ -454,5 +511,31 @@ mod tests {
         let sound_seconds: f64 = probe(&output, "a:0", "stream=duration", false).parse().unwrap();
         assert!((sound_seconds - 4.0).abs() < 0.05, "{sound_seconds}");
         assert!(*last.lock().unwrap() > 0.5);
+    }
+
+    #[test]
+    #[ignore = "needs src-tauri/ffmpeg/ffmpeg.exe and ffprobe.exe"]
+    fn a_real_export_with_two_layers_has_the_exact_number_of_frames() {
+        let folder = tempfile::tempdir().unwrap();
+        let wide = folder.path().join("wide.mp4");
+        let tall = folder.path().join("tall.mp4");
+        make_video(&wide, "640x360", "30", "3", true);
+        make_video(&tall, "360x640", "25", "2", true);
+        let output = folder.path().join("layers.mp4");
+        let request = ExportRequest {
+            output: output.to_string_lossy().into_owned(),
+            width: 640,
+            height: 360,
+            fps: 30.0,
+            quality: "standard".into(),
+            layers: vec![
+                vec![clip(&wide.to_string_lossy(), 0.0, 90, true)],
+                vec![gap(15), clip(&tall.to_string_lossy(), 0.0, 45, true), gap(30)],
+            ],
+        };
+        run_export(&real("ffmpeg.exe"), &request, folder.path(), &|_| {}).unwrap();
+        assert_eq!(probe(&output, "v:0", "stream=nb_read_frames", true), "90");
+        let sound_seconds: f64 = probe(&output, "a:0", "stream=duration", false).parse().unwrap();
+        assert!((sound_seconds - 3.0).abs() < 0.05, "{sound_seconds}");
     }
 }

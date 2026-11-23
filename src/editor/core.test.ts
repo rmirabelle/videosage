@@ -6,14 +6,15 @@ import { findSnap, snapTargets } from "./snap";
 import { formatTimecode, mediaLength, secondsToFrames } from "./time";
 
 const sample: Project = {
-  version: 1,
+  version: 2,
   fps: 30,
   width: 1920,
   height: 1080,
   media: [{ id: "a", path: "C:\\Videos\\a.mp4", name: "a.mp4", durationSec: 10, fps: 30, width: 1920, height: 1080, hasSound: true, playable: true }],
   clips: [
-    { id: "x", mediaId: "a", start: 10, sourceIn: 0, length: 20 },
-    { id: "y", mediaId: "a", start: 50, sourceIn: 20, length: 30 }
+    { id: "x", mediaId: "a", layer: 0, start: 10, sourceIn: 0, length: 20 },
+    { id: "z", mediaId: "a", layer: 1, start: 15, sourceIn: 0, length: 40 },
+    { id: "y", mediaId: "a", layer: 0, start: 50, sourceIn: 20, length: 30 }
   ]
 };
 
@@ -36,8 +37,8 @@ describe("time", () => {
 
 describe("snap", () => {
   it("lists frame 0, the playhead and the ends of clips that are not dragged", () => {
-    expect(snapTargets(sample, new Set(["x"]), 42)).toEqual([0, 42, 50, 80]);
-    expect(snapTargets(sample, new Set(), null)).toEqual([0, 10, 30, 50, 80]);
+    expect(snapTargets(sample, new Set(["x", "z"]), 42)).toEqual([0, 42, 50, 80]);
+    expect(snapTargets(sample, new Set(), null)).toEqual([0, 10, 15, 30, 50, 55, 80]);
   });
 
   it("takes the nearest target in range", () => {
@@ -95,18 +96,29 @@ describe("project file", () => {
     };
     expect(() => parseProject("not json")).toThrow("not a Video Sage project");
     expect(() => parseProject("[]")).toThrow("not a Video Sage project");
-    expect(() => parseProject(change((data) => { data.version = 2; }))).toThrow("newer version");
+    expect(() => parseProject(change((data) => { data.version = 3; }))).toThrow("newer version");
     expect(() => parseProject(change((data) => { data.fps = 0; }))).toThrow("settings");
     expect(() => parseProject(change((data) => { data.clips[0].length = 0; }))).toThrow("clip");
     expect(() => parseProject(change((data) => { data.clips[0].start = 1.5; }))).toThrow("clip");
     expect(() => parseProject(change((data) => { data.clips[0].mediaId = "none"; }))).toThrow("no media file");
-    expect(() => parseProject(change((data) => { data.clips[1].start = 20; }))).toThrow("overlap");
+    expect(() => parseProject(change((data) => { data.clips[2].start = 20; }))).toThrow("overlap");
+    expect(() => parseProject(change((data) => { data.clips[1].layer = 0; }))).toThrow("overlap");
+    expect(() => parseProject(change((data) => { data.clips[1].layer = -1; }))).toThrow("clip");
     expect(() => parseProject(change((data) => { delete data.media[0].path; }))).toThrow("media entry");
   });
 
   it("sorts the clips by start", () => {
     const data = JSON.parse(serializeProject(sample));
     data.clips.reverse();
-    expect(parseProject(JSON.stringify(data)).clips.map((clip) => clip.id)).toEqual(["x", "y"]);
+    expect(parseProject(JSON.stringify(data)).clips.map((clip) => clip.id)).toEqual(["x", "z", "y"]);
+  });
+
+  it("reads a version 1 file with all clips on layer 0", () => {
+    const data = JSON.parse(serializeProject({ ...sample, clips: [sample.clips[0], sample.clips[2]] }));
+    data.version = 1;
+    for (const clip of data.clips) delete clip.layer;
+    const read = parseProject(JSON.stringify(data));
+    expect(read.version).toBe(2);
+    expect(read.clips.map((clip) => clip.layer)).toEqual([0, 0]);
   });
 });

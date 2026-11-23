@@ -19,10 +19,15 @@ export interface MediaItem {
   playable: boolean;
 }
 
-/** One piece of a media file on the track. */
+/** One piece of a media file on a layer. */
 export interface Clip {
   id: string;
   mediaId: string;
+  /**
+   * The layer of the clip: 0 is the bottom layer. A clip on a higher layer
+   * shows on top of the clips under it. The sound of all layers plays.
+   */
+  layer: number;
   /** The first frame of the clip on the track. */
   start: number;
   /** The first frame that the clip uses from its media file. */
@@ -32,18 +37,19 @@ export interface Clip {
 }
 
 export interface Project {
-  version: 1;
+  version: number;
   fps: number;
   width: number;
   height: number;
   media: MediaItem[];
-  /** Sorted by start. Clips do not overlap. */
+  /** Sorted by start. Clips on the same layer do not overlap. */
   clips: Clip[];
 }
 
 /** A clip on the clipboard: its position is relative to the first copied clip. */
 export interface ClipboardClip {
   mediaId: string;
+  layer: number;
   offset: number;
   sourceIn: number;
   length: number;
@@ -52,13 +58,16 @@ export interface ClipboardClip {
 export const DEFAULT_FPS = 30;
 
 export function emptyProject(): Project {
-  return { version: 1, fps: DEFAULT_FPS, width: 1920, height: 1080, media: [], clips: [] };
+  return { version: 2, fps: DEFAULT_FPS, width: 1920, height: 1080, media: [], clips: [] };
 }
 
 /** The frame after the last frame of the clip. */
 export const clipEnd = (clip: Clip) => clip.start + clip.length;
 
-/** The frame after the last clip, or 0 for an empty track. */
+/** The number of layers: one more than the highest layer of a clip, and 1 or more. */
+export const layerCount = (project: Project) => project.clips.reduce((count, clip) => Math.max(count, clip.layer + 1), 1);
+
+/** The frame after the last clip, or 0 for an empty timeline. */
 export const projectEnd = (project: Project) => project.clips.reduce((end, clip) => Math.max(end, clipEnd(clip)), 0);
 
 /** Makes the id of a new clip or media item. */

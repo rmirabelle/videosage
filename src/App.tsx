@@ -2,10 +2,11 @@ import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { save } from "@tauri-apps/plugin-dialog";
-import { Check } from "@phosphor-icons/react";
+import { ArrowLineLeft, Check, Copy, Export, Repeat, Scissors, Trash } from "@phosphor-icons/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AboutDialog } from "./components/AboutDialog";
 import { ConfirmDialog } from "./components/ConfirmDialog";
+import { ContextMenu, type ContextMenuItem } from "./components/ContextMenu";
 import { ExportDialog } from "./components/ExportDialog";
 import { MediaBin } from "./components/MediaBin";
 import { MenuBar, type Menu } from "./components/MenuBar";
@@ -16,8 +17,8 @@ import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { Timeline, type TimelineHandle } from "./components/Timeline";
 import { TitleBar } from "./components/TitleBar";
 import { canRedo, canUndo, record, redo, startHistory, undo } from "./editor/history";
-import { clipEnd, emptyProject, projectEnd, type ClipboardClip, type MediaItem, type Project } from "./editor/model";
-import { addMedia, canJoin, clipAt, closeGaps, copyClips, deleteClips, insertMedia, joinClips, pasteClips, relinkMedia, removeMedia, splitAt } from "./editor/operations";
+import { clipEnd, emptyProject, layerCount, projectEnd, type ClipboardClip, type MediaItem, type Project } from "./editor/model";
+import { addMedia, canJoin, closeGaps, compactLayers, copyClips, deleteClips, insertMedia, joinClips, pasteClips, relinkMedia, removeMedia, selectionProject, selectionRange, splitAt } from "./editor/operations";
 import { FILE_EXTENSION, parseProject, serializeProject } from "./editor/projectFile";
 import { probeMedia } from "./lib/media";
 import { addRecentProject, missingFiles, readProjectFile, recentProjects, writeProjectFile } from "./lib/projects";
@@ -53,7 +54,12 @@ export default function App() {
   const [startupUpdate, setStartupUpdate] = useState<UpdateInfo | null>(null);
   const [aboutOpen, setAboutOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
-  const [exportOpen, setExportOpen] = useState(false);
+  /** The export dialog is open, for the whole timeline or for the selected clips. */
+  const [exportOpen, setExportOpen] = useState<"timeline" | "selection" | null>(null);
+  /** The right-click menu of the clips is open at this point of the window. */
+  const [clipMenu, setClipMenu] = useState<{ x: number; y: number } | null>(null);
+  /** Loop play: play repeats the selected clips, or the whole timeline when no clip is selected. */
+  const [loop, setLoop] = useState(false);
   const [history, setHistory] = useState(() => startHistory(emptyProject()));
   const [importing, setImporting] = useState<string[]>([]);
   const [dropActive, setDropActive] = useState(false);
@@ -125,9 +131,12 @@ export default function App() {
     setSeekCount((count) => count + 1);
   }, []);
 
-  /** Makes an edit to the project, as one undo step. An edit that changes nothing makes no step. */
+  /**
+   * Makes an edit to the project, as one undo step. An edit that changes
+   * nothing makes no step. A layer that the edit makes empty goes away.
+   */
   const edit = useCallback((change: (project: Project) => Project) => {
-    setHistory((current) => record(current, change(current.present)));
+    setHistory((current) => record(current, compactLayers(change(current.present))));
   }, []);
 
   const notify = useCallback((text: string) => {
@@ -136,8 +145,9 @@ export default function App() {
 
   /**
    * Reads the files one at a time. Each video goes in the media list and on
-   * the timeline, after the last clip, as one undo step. A file that fails
-   * shows a message.
+   * the timeline, as one undo step. On an empty timeline, a video goes on
+   * layer 1; when the timeline has clips, each video goes on a new layer on
+   * top, at the playhead. A file that fails shows a message.
    */
   const importPaths = useCallback(async (paths: string[]) => {
     for (const path of paths) {
@@ -148,7 +158,9 @@ export default function App() {
         const item = await probeMedia(path);
         edit((current) => {
           const withMedia = addMedia(current, item);
-          return withMedia === current ? current : insertMedia(withMedia, item.id, projectEnd(withMedia)).project;
+          if (withMedia === current) return current;
+          if (withMedia.clips.length === 0) return insertMedia(withMedia, item.id, 0).project;
+          return insertMedia(withMedia, item.id, playheadRef.current, layerCount(withMedia)).project;
         });
       } catch (error) {
         notify(`Could not import ${name}. ${String(error)}`);
@@ -162,11 +174,11 @@ export default function App() {
   }, [edit, notify]);
 
   const importMedia = useCallback(async () => {
-    const picked = await pickFiles({ kind: "video", title: "Import Media", hint: "Choose one or more video files. They go on the timeline after the last clip.", openLabel: "Import", multiple: true });
+    const picked = await pickFiles({ kind: "video", title: "Import Media", hint: "Choose one or more video files. When the timeline has clips, each video goes on a new layer at the playhead.", openLabel: "Import", multiple: true });
     if (picked) await importPaths(picked);
   }, [importPaths, pickFiles]);
 
-  /** Puts a media file on the timeline after the last clip, and selects the new clip. */
+  /** Puts a media file on layer 1 after its last clip, and selects the new clip. */
   const addToTimeline = useCallback((item: MediaItem) => {
     const added = insertMedia(projectRef.current, item.id, projectEnd(projectRef.current));
     if (!added.clipId) return;
@@ -297,9 +309,16 @@ export default function App() {
    * project, selection, playhead and clipboard.
    */
   const hasSelection = selection.size > 0;
-  const splitClip = clipAt(project, playhead);
+  const canSplit = splitAt(project, playhead, selection) !== project;
+  const range = selectionRange(project, selection);
+  const selectedLayers = hasSelection ? new Set(project.clips.filter((clip) => selection.has(clip.id)).map((clip) => clip.layer)) : undefined;
+  /** Moves the playhead by a number of frames (the arrow keys). */
+  const step = (frames: number) => movePlayhead(playheadRef.current + frames);
+  const second = Math.max(1, Math.round(project.fps));
   const commands = {
     newProject: { can: true, run: () => afterSaveQuestion(() => showProject(emptyProject(), null, NO_PATHS)) },
+    /* Closing the project leaves an empty, untitled project with no media. */
+    closeProject: { can: filePath !== null || project.media.length > 0 || dirty, run: () => afterSaveQuestion(() => showProject(emptyProject(), null, NO_PATHS)) },
     openProject: { can: true, run: () => afterSaveQuestion(() => void openProject()) },
     save: { can: true, run: () => void saveProject() },
     saveAs: { can: true, run: () => void saveProjectAs() },
@@ -307,7 +326,14 @@ export default function App() {
       can: end > 0,
       run: () => {
         setPlaying(false);
-        setExportOpen(true);
+        setExportOpen("timeline");
+      }
+    },
+    exportSelection: {
+      can: hasSelection,
+      run: () => {
+        setPlaying(false);
+        setExportOpen("selection");
       }
     },
     undo: { can: canUndo(history), run: () => setHistory(undo) },
@@ -335,16 +361,33 @@ export default function App() {
     },
     delete: { can: hasSelection, run: () => edit((current) => deleteClips(current, selection)) },
     selectAll: { can: project.clips.length > 0, run: () => setSelection(new Set(project.clips.map((clip) => clip.id))) },
-    split: { can: splitClip !== undefined && splitClip.start !== playhead, run: () => edit((current) => splitAt(current, playhead)) },
+    split: { can: canSplit, run: () => edit((current) => splitAt(current, playhead, selection)) },
     join: { can: canJoin(project, selection), run: () => edit((current) => joinClips(current, selection)) },
-    closeGaps: { can: closeGaps(project) !== project, run: () => edit(closeGaps) },
+    closeGaps: { can: closeGaps(project, selectedLayers) !== project, run: () => edit((current) => closeGaps(current, selectedLayers)) },
     toggleSnapping: { can: true, run: () => setSnapping((current) => !current) },
-    togglePlay: { can: end > 0, run: () => setPlaying((current) => !current) }
+    togglePlay: { can: end > 0, run: () => setPlaying((current) => !current) },
+    toggleLoop: { can: true, run: () => setLoop((current) => !current) },
+    loopSelection: {
+      can: range !== null,
+      run: () => {
+        if (!range) return;
+        setLoop(true);
+        movePlayhead(range.start);
+        setPlaying(true);
+      }
+    },
+    goToStart: { can: end > 0, run: () => movePlayhead(0) },
+    goToEnd: { can: end > 0, run: () => movePlayhead(Infinity) },
+    goToSelectionStart: { can: range !== null, run: () => { if (range) movePlayhead(range.start); } },
+    stepBack: { can: end > 0, run: () => step(-1) },
+    stepForward: { can: end > 0, run: () => step(1) }
   };
   const commandsRef = useRef(commands);
   commandsRef.current = commands;
   const playheadRef = useRef(playhead);
   playheadRef.current = playhead;
+  const secondRef = useRef(second);
+  secondRef.current = second;
 
   useEffect(() => {
     void revealMainWindow();
@@ -439,6 +482,7 @@ export default function App() {
       const ctrl = event.ctrlKey && !event.shiftKey && !event.altKey;
       const ctrlShift = event.ctrlKey && event.shiftKey && !event.altKey;
       const plain = !event.ctrlKey && !event.shiftKey && !event.altKey;
+      const shift = event.shiftKey && !event.ctrlKey && !event.altKey;
       const key = event.key.toLowerCase();
       const run = (name: keyof typeof commands) => {
         const command = commandsRef.current[name];
@@ -447,6 +491,7 @@ export default function App() {
       let handled = true;
       if (event.key === "?") setShortcutsOpen(true);
       else if (ctrl && key === "n") run("newProject");
+      else if (ctrl && key === "w") run("closeProject");
       else if (ctrl && key === "o") run("openProject");
       else if (ctrl && key === "s") run("save");
       else if (ctrlShift && key === "s") run("saveAs");
@@ -463,14 +508,22 @@ export default function App() {
       else if (plain && key === "s") run("split");
       else if (plain && key === "n") run("toggleSnapping");
       else if (plain && key === " ") run("togglePlay");
+      else if (plain && key === "l") run("toggleLoop");
       else if (ctrl && (key === "=" || key === "+")) timelineRef.current?.zoomIn();
       else if (ctrl && key === "-") timelineRef.current?.zoomOut();
       else if (ctrl && key === "0") timelineRef.current?.zoomToFit();
       else if (plain && key === "escape") setSelection(NO_SELECTION);
       else if (plain && key === "home") movePlayhead(0);
       else if (plain && key === "end") movePlayhead(Infinity);
-      else if (plain && key === "arrowleft") movePlayhead(playheadRef.current - 1);
-      else if (plain && key === "arrowright") movePlayhead(playheadRef.current + 1);
+      else if (shift && key === "home") run("goToSelectionStart");
+      else if (key === "arrowleft" || key === "arrowright") {
+        /* Left and Right go one frame; Shift goes 10 frames, Ctrl one second, Ctrl + Shift 10 seconds. */
+        if (event.altKey) handled = false;
+        else {
+          const size = event.ctrlKey ? (event.shiftKey ? 10 * secondRef.current : secondRef.current) : event.shiftKey ? 10 : 1;
+          movePlayhead(playheadRef.current + (key === "arrowleft" ? -size : size));
+        }
+      }
       else handled = false;
       if (handled) event.preventDefault();
     };
@@ -492,6 +545,27 @@ export default function App() {
     run: () => afterSaveQuestion(() => void openPath(path))
   }));
 
+  const closeClipMenu = useCallback(() => setClipMenu(null), []);
+
+  /** The right-click menu of the selected clips. */
+  const contextItem = (label: string, icon: React.ReactNode, shortcut: string | undefined, name: keyof typeof commands, danger = false): ContextMenuItem => ({
+    label,
+    icon,
+    shortcut,
+    danger,
+    disabled: !commands[name].can,
+    run: () => commandsRef.current[name].run()
+  });
+  const clipMenuItems: ContextMenuItem[] = [
+    contextItem(selection.size > 1 ? "Export Selected Clips…" : "Export This Clip…", <Export size={15} />, undefined, "exportSelection"),
+    contextItem("Loop Play", <Repeat size={15} />, undefined, "loopSelection"),
+    contextItem("Go to Start of Selection", <ArrowLineLeft size={15} />, "Shift+Home", "goToSelectionStart"),
+    "separator",
+    contextItem("Split at Playhead", <Scissors size={15} />, "S", "split"),
+    contextItem("Copy", <Copy size={15} />, "Ctrl+C", "copy"),
+    contextItem("Delete", <Trash size={15} />, "Del", "delete", true)
+  ];
+
   const menus: Menu[] = [
     {
       id: "file",
@@ -499,6 +573,7 @@ export default function App() {
       items: [
         item("New Project", "Ctrl+N", "newProject"),
         item("Open Project…", "Ctrl+O", "openProject"),
+        item("Close Project", "Ctrl+W", "closeProject"),
         "separator",
         item("Save", "Ctrl+S", "save"),
         item("Save As…", "Ctrl+Shift+S", "saveAs"),
@@ -507,6 +582,7 @@ export default function App() {
         ...(recentItems.length > 0 ? ["separator" as const] : []),
         { label: "Import Media…", shortcut: "Ctrl+I", run: () => void importMedia() },
         item("Export Video…", "Ctrl+E", "exportVideo"),
+        item("Export Selection…", undefined, "exportSelection"),
         "separator",
         { label: "Exit", shortcut: "Alt+F4", run: () => { if (isTauri()) void getCurrentWindow().close(); } }
       ]
@@ -541,6 +617,22 @@ export default function App() {
       ]
     },
     {
+      id: "playback",
+      label: "Playback",
+      items: [
+        item(playing ? "Pause" : "Play", "Space", "togglePlay"),
+        { ...item("Loop Play", "L", "toggleLoop"), icon: loop ? <Check size={13} weight="bold" /> : undefined },
+        item("Loop Play the Selection", undefined, "loopSelection"),
+        "separator",
+        item("Go to Start", "Home", "goToStart"),
+        item("Go to End", "End", "goToEnd"),
+        item("Go to Start of Selection", "Shift+Home", "goToSelectionStart"),
+        "separator",
+        item("One Frame Back", "Left", "stepBack"),
+        item("One Frame Forward", "Right", "stepForward")
+      ]
+    },
+    {
       id: "help",
       label: "Help",
       items: [
@@ -567,6 +659,9 @@ export default function App() {
           onPlayerFrame={setPlayheadFrame}
           onSeek={movePlayhead}
           seekCount={seekCount}
+          loop={loop}
+          loopRange={loop ? range ?? { start: 0, end } : null}
+          onToggleLoop={commands.toggleLoop.run}
         />
         <Timeline
           ref={timelineRef}
@@ -580,6 +675,7 @@ export default function App() {
           onToggleSnapping={commands.toggleSnapping.run}
           onSplit={commands.split.can ? commands.split.run : null}
           follow={playing}
+          onClipMenu={(x, y) => setClipMenu({ x, y })}
         />
       </main>
       <Notices notices={notices} onClose={(id) => setNotices((current) => current.filter((notice) => notice.id !== id))} />
@@ -592,12 +688,14 @@ export default function App() {
           onCancel={() => setRemoving(null)}
         />
       )}
+      {clipMenu && <ContextMenu x={clipMenu.x} y={clipMenu.y} items={clipMenuItems} onClose={closeClipMenu} />}
       {exportOpen && (
         <ExportDialog
-          project={project}
+          project={exportOpen === "selection" ? selectionProject(project, selection) : project}
+          selection={exportOpen === "selection"}
           missing={missing}
-          suggestedPath={filePath ? filePath.replace(/\.[^.\\/]*$/, "") + ".mp4" : "Untitled Project.mp4"}
-          onClose={() => setExportOpen(false)}
+          suggestedPath={(filePath ? filePath.replace(/\.[^.\\/]*$/, "") : "Untitled Project") + (exportOpen === "selection" ? " (selection).mp4" : ".mp4")}
+          onClose={() => setExportOpen(null)}
         />
       )}
       {picker && (

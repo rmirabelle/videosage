@@ -10,7 +10,8 @@ export interface ExportRequest {
   height: number;
   fps: number;
   quality: ExportQuality;
-  segments: ExportSegment[];
+  /** The layers from the bottom up; each one is as long as the timeline. */
+  layers: ExportSegment[][];
 }
 
 /** The error text of an export that the user stopped. */

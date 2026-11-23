@@ -1,23 +1,27 @@
 import { describe, expect, it } from "vitest";
 import { clipEnd, type Clip, type MediaItem, type Project } from "./model";
-import { addMedia, canJoin, clipAt, closeGaps, copyClips, deleteClips, insertMedia, joinClips, moveClips, pasteClips, relinkMedia, removeMedia, splitAt, trimEnd, trimStart } from "./operations";
+import { addMedia, canJoin, clipAt, closeGaps, compactLayers, selectionProject, selectionRange, topClipAt, copyClips, deleteClips, insertMedia, joinClips, moveClips, pasteClips, relinkMedia, removeMedia, splitAt, trimEnd, trimStart } from "./operations";
 
 /** A 10 s media file: 300 frames at the project's 30 fps. */
 const media = (id: string): MediaItem => ({ id, path: `C:\\Videos\\${id}.mp4`, name: `${id}.mp4`, durationSec: 10, fps: 30, width: 1920, height: 1080, hasSound: true, playable: true });
 
-const clip = (id: string, start: number, length: number, sourceIn = 0, mediaId = "a"): Clip => ({ id, mediaId, start, sourceIn, length });
+const clip = (id: string, start: number, length: number, sourceIn = 0, mediaId = "a", layer = 0): Clip => ({ id, mediaId, layer, start, sourceIn, length });
 
-const project = (...clips: Clip[]): Project => ({ version: 1, fps: 30, width: 1920, height: 1080, media: [media("a"), media("b")], clips });
+const project = (...clips: Clip[]): Project => ({ version: 2, fps: 30, width: 1920, height: 1080, media: [media("a"), media("b")], clips });
 
 const ids = (...list: string[]) => new Set(list);
 
 /** The rules that every project must keep after every edit. */
 function expectValid(result: Project) {
+  const layerEnds = new Map<number, number>();
   result.clips.forEach((item, index) => {
     expect(Number.isInteger(item.start) && item.start >= 0).toBe(true);
     expect(Number.isInteger(item.length) && item.length >= 1).toBe(true);
     expect(Number.isInteger(item.sourceIn) && item.sourceIn >= 0).toBe(true);
-    if (index > 0) expect(item.start).toBeGreaterThanOrEqual(clipEnd(result.clips[index - 1]));
+    expect(Number.isInteger(item.layer) && item.layer >= 0).toBe(true);
+    if (index > 0) expect(item.start).toBeGreaterThanOrEqual(result.clips[index - 1].start);
+    expect(item.start).toBeGreaterThanOrEqual(layerEnds.get(item.layer) ?? 0);
+    layerEnds.set(item.layer, clipEnd(item));
   });
   expect(new Set(result.clips.map((item) => item.id)).size).toBe(result.clips.length);
 }
@@ -215,7 +219,7 @@ describe("insertMedia", () => {
 
 describe("addMedia", () => {
   it("sets the project frame rate and size from the first file only", () => {
-    const empty: Project = { version: 1, fps: 30, width: 1920, height: 1080, media: [], clips: [] };
+    const empty: Project = { version: 2, fps: 30, width: 1920, height: 1080, media: [], clips: [] };
     const first = addMedia(empty, { ...media("a"), fps: 24000 / 1001, width: 1280, height: 720 });
     expect([first.fps, first.width, first.height]).toEqual([23.976, 1280, 720]);
     const second = addMedia(first, { ...media("b"), fps: 60, width: 3840, height: 2160 });
@@ -245,5 +249,91 @@ describe("relinkMedia", () => {
 
   it("gives null when the project already has the new file", () => {
     expect(relinkMedia(project(), "a", found(10, media("b").path))).toBeNull();
+  });
+});
+
+describe("layers", () => {
+  const on = (layer: number, id: string, start: number, length: number) => clip(id, start, length, 0, "a", layer);
+  const places = (result: Project) => result.clips.map((item) => [item.id, item.layer, item.start]);
+
+  it("finds the clip on a layer and the clip on top", () => {
+    const p = project(on(0, "x", 0, 100), on(1, "y", 20, 10));
+    expect(clipAt(p, 25, 0)?.id).toBe("x");
+    expect(clipAt(p, 25, 1)?.id).toBe("y");
+    expect(topClipAt(p, 25)?.id).toBe("y");
+    expect(topClipAt(p, 50)?.id).toBe("x");
+  });
+
+  it("lets clips on different layers overlap, and moves a clip to another layer", () => {
+    const p = project(on(0, "x", 0, 100), on(1, "y", 200, 10));
+    const result = moveClips(p, ids("y"), -180, 0);
+    expectValid(result);
+    expect(places(result)).toEqual([["x", 0, 0], ["y", 1, 20]]);
+    /* Down to layer 0, where x is: y goes to the nearest free place. */
+    expect(places(moveClips(p, ids("y"), -180, -1))).toEqual([["x", 0, 0], ["y", 0, 100]]);
+  });
+
+  it("stops at layer 0 and at one new layer above the top", () => {
+    const p = project(on(0, "x", 0, 10), on(1, "y", 0, 10));
+    expect(moveClips(p, ids("x"), 0, -3)).toBe(p);
+    expect(places(moveClips(p, ids("y"), 0, 5))).toEqual([["x", 0, 0], ["y", 2, 0]]);
+  });
+
+  it("splits all clips under the playhead, or only the selected ones", () => {
+    const p = project(on(0, "x", 0, 100), on(1, "y", 20, 50));
+    expect(splitAt(p, 40).clips).toHaveLength(4);
+    expect(splitAt(p, 40, ids("y")).clips).toHaveLength(3);
+    expect(splitAt(p, 40, ids("y")).clips.filter((item) => item.layer === 1)).toHaveLength(2);
+  });
+
+  it("deletes with no hole on the clip's layer only", () => {
+    const p = project(on(0, "x", 0, 10), on(0, "y", 10, 10), on(1, "z", 15, 10));
+    expect(places(deleteClips(p, ids("x")))).toEqual([["y", 0, 0], ["z", 1, 15]]);
+  });
+
+  it("trims up to the next clip on the same layer only", () => {
+    const p = project(on(0, "x", 0, 10), on(1, "y", 20, 10));
+    expect(trimEnd(p, "x", 50).clips.find((item) => item.id === "x")?.length).toBe(50);
+    const q = project(on(0, "x", 0, 10), on(0, "y", 20, 10));
+    expect(trimEnd(q, "x", 50).clips.find((item) => item.id === "x")?.length).toBe(20);
+  });
+
+  it("does not join clips on different layers", () => {
+    const p = project(clip("x", 0, 10, 0, "a", 0), clip("y", 10, 10, 10, "a", 1));
+    expect(canJoin(p, ids("x", "y"))).toBe(false);
+  });
+
+  it("closes the gaps of each layer, or of chosen layers", () => {
+    const p = project(on(0, "x", 5, 10), on(1, "y", 30, 10));
+    expect(places(closeGaps(p))).toEqual([["x", 0, 0], ["y", 1, 0]]);
+    expect(places(closeGaps(p, new Set([1])))).toEqual([["y", 1, 0], ["x", 0, 5]]);
+  });
+
+  it("pastes each clip on its layer and moves later clips of that layer only", () => {
+    const p = project(on(0, "x", 0, 10), on(1, "y", 0, 10), on(0, "z", 20, 10));
+    const { project: result } = pasteClips(p, copyClips(p, ids("y")), 15);
+    expectValid(result);
+    expect(result.clips.filter((item) => item.layer === 1).map((item) => item.start)).toEqual([0, 15]);
+    expect(result.clips.find((item) => item.id === "z")?.start).toBe(20);
+  });
+
+  it("removes empty layers", () => {
+    const p = project(on(0, "x", 0, 10), on(3, "y", 0, 10));
+    expect(places(compactLayers(p))).toEqual([["x", 0, 0], ["y", 1, 0]]);
+    const q = project(on(0, "x", 0, 10));
+    expect(compactLayers(q)).toBe(q);
+  });
+
+  it("makes a project of the selection, from frame 0", () => {
+    const p = project(on(0, "x", 0, 10), on(0, "y", 100, 10), on(2, "z", 120, 10));
+    const result = selectionProject(p, ids("y", "z"));
+    expect(places(result)).toEqual([["y", 0, 0], ["z", 1, 20]]);
+    expect(selectionRange(p, ids("y", "z"))).toEqual({ start: 100, end: 130 });
+    expect(selectionRange(p, ids())).toBeNull();
+  });
+
+  it("puts new media on a chosen layer", () => {
+    const result = insertMedia(project(on(0, "x", 0, 100)), "b", 30, 1).project;
+    expect(result.clips.map((item) => [item.mediaId, item.layer, item.start])).toEqual([["a", 0, 0], ["b", 1, 30]]);
   });
 });
