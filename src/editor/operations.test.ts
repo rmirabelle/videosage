@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { clipEnd, type Clip, type MediaItem, type Project } from "./model";
-import { addMedia, canJoin, clipAt, closeGaps, compactLayers, fadeAt, fadeIns, selectionProject, selectionRange, topClipAt, copyClips, deleteClips, importPlacement, insertMedia, joinClips, moveClips, pasteClips, placeImport, relinkMedia, removeMedia, splitAt, trimEnd, trimStart } from "./operations";
+import { clipEnd, sourceFrameAt, type Clip, type MediaItem, type Project } from "./model";
+import { addMedia, canJoin, clipAt, closeGaps, compactLayers, fadeAt, fadeIns, selectionProject, selectionRange, topClipAt, copyClips, deleteClips, importPlacement, insertMedia, joinClips, normalSpeed, reverseClips, stretchEnd, stretchStart, moveClips, pasteClips, placeImport, relinkMedia, removeMedia, splitAt, trimEnd, trimStart } from "./operations";
 
 /** A 10 s media file: 300 frames at the project's 30 fps. */
 const media = (id: string): MediaItem => ({ id, path: `C:\\Videos\\${id}.mp4`, name: `${id}.mp4`, durationSec: 10, fps: 30, width: 1920, height: 1080, hasSound: true, playable: true });
@@ -21,7 +21,7 @@ function expectValid(result: Project) {
   result.clips.forEach((item, index) => {
     expect(Number.isInteger(item.start) && item.start >= 0).toBe(true);
     expect(Number.isInteger(item.length) && item.length >= 1).toBe(true);
-    expect(Number.isInteger(item.sourceIn) && item.sourceIn >= 0).toBe(true);
+    expect(Number.isFinite(item.sourceIn) && item.sourceIn >= 0).toBe(true);
     expect(Number.isInteger(item.layer) && item.layer >= 0).toBe(true);
     if (index > 0) expect(item.start).toBeGreaterThanOrEqual(result.clips[index - 1].start);
     const before = layerClips.get(item.layer) ?? [];
@@ -296,6 +296,80 @@ describe("crossfades", () => {
     const { project: pasted } = pasteClips(p, [{ mediaId: "a", layer: 0, offset: 0, sourceIn: 0, length: 10 }], 90);
     expectValid(pasted);
     expect(pasted.clips.map((item) => item.start)).toEqual([0, 10, 90, 210]);
+  });
+});
+
+describe("speed and reverse", () => {
+  /** A clip with a speed, and reversed when "reversed" is true. */
+  const timed = (id: string, start: number, length: number, sourceIn: number, speed: number, reversed = false): Clip => ({ ...clip(id, start, length, sourceIn), ...(speed !== 1 ? { speed } : {}), ...(reversed ? { reversed: true } : {}) });
+
+  it("finds the frame of the file at a place in the clip", () => {
+    expect(sourceFrameAt(timed("x", 0, 100, 30, 0.5), 10)).toBe(35);
+    expect(sourceFrameAt(timed("x", 0, 100, 30, 0.5, true), 0)).toBe(80);
+    expect(sourceFrameAt(timed("x", 0, 100, 30, 0.5, true), 100)).toBe(30);
+  });
+
+  it("stretches the end: the clip keeps its part of the file and plays slower or faster", () => {
+    const p = project(clip("x", 0, 100, 20), clip("y", 500, 10));
+    expect(stretchEnd(p, "x", 200).clips[0]).toEqual({ ...clip("x", 0, 200, 20), speed: 0.5 });
+    expect(stretchEnd(p, "x", 50).clips[0]).toEqual({ ...clip("x", 0, 50, 20), speed: 2 });
+    /* It stops at the next clip, and at the fastest speed. */
+    expect(stretchEnd(p, "x", 900).clips[0].length).toBe(500);
+    expect(stretchEnd(p, "x", 1).clips[0].length).toBe(10);
+    /* Back at the first length, the speed is normal again. */
+    expect(stretchEnd(stretchEnd(p, "x", 200), "x", 100).clips[0]).toEqual(clip("x", 0, 100, 20));
+  });
+
+  it("stretches the start and keeps the end", () => {
+    const result = stretchStart(project(clip("x", 100, 100)), "x", 0);
+    expectValid(result);
+    expect(result.clips[0]).toEqual({ ...clip("x", 0, 200), speed: 0.5 });
+    expect(stretchStart(project(clip("w", 0, 50), clip("x", 100, 100)), "x", 0).clips[1].start).toBe(50);
+  });
+
+  it("splits and joins a stretched or reversed clip with no change", () => {
+    for (const start of [timed("x", 0, 100, 30, 0.5), timed("x", 0, 100, 30, 0.5, true), timed("x", 0, 90, 0, 1, true)]) {
+      const p = project(start);
+      const split = splitAt(p, 40);
+      expectValid(split);
+      expect(split.clips).toHaveLength(2);
+      const all = ids(...split.clips.map((item) => item.id));
+      expect(canJoin(split, all)).toBe(true);
+      expect(joinClips(split, all)).toEqual(p);
+    }
+    /* The first part of a reversed clip shows the end of the file part. */
+    const parts = splitAt(project(timed("x", 0, 100, 30, 0.5, true)), 40).clips;
+    expect(parts.map((item) => [item.start, item.length, item.sourceIn])).toEqual([[0, 40, 60], [40, 60, 30]]);
+  });
+
+  it("trims a reversed clip at the other end of its file part", () => {
+    /* The end of a reversed clip shows its first file frame: it can go back to frame 0 of the file. */
+    expect(trimEnd(project(timed("x", 0, 100, 30, 1, true)), "x", 500).clips[0]).toMatchObject({ length: 130, sourceIn: 0 });
+    /* Its start shows its last file frame: it can go to the file's end (300 frames). */
+    expect(trimStart(project(timed("x", 250, 100, 30, 1, true)), "x", 0).clips[0]).toMatchObject({ start: 80, length: 270, sourceIn: 30 });
+    /* At half speed, each frame of the file is two frames of the timeline. */
+    expect(trimEnd(project(timed("x", 0, 100, 250, 0.5)), "x", 500).clips[0]).toMatchObject({ length: 100 + 2 * (300 - 250 - 50) });
+  });
+
+  it("reverses the clips, and a second reverse plays them forward", () => {
+    const p = project(clip("x", 0, 10), clip("y", 20, 10));
+    const once = reverseClips(p, ids("x"));
+    expect(once.clips[0].reversed).toBe(true);
+    expect(once.clips[1].reversed).toBeUndefined();
+    expect(reverseClips(once, ids("x"))).toEqual(p);
+  });
+
+  it("gives back the normal speed and stops at the next clip", () => {
+    expect(normalSpeed(project(timed("x", 0, 200, 10, 0.5)), ids("x")).clips[0]).toEqual(clip("x", 0, 100, 10));
+    const tight = normalSpeed(project(timed("x", 0, 50, 0, 2), clip("y", 80, 10)), ids("x"));
+    expectValid(tight);
+    expect(tight.clips[0]).toEqual(clip("x", 0, 80));
+  });
+
+  it("copies and pastes the speed and the reverse", () => {
+    const p = project(timed("x", 0, 100, 0, 0.5, true));
+    const { project: pasted } = pasteClips(p, copyClips(p, ids("x")), 100);
+    expect(pasted.clips[1]).toMatchObject({ speed: 0.5, reversed: true });
   });
 });
 

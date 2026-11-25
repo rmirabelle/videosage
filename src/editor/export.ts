@@ -1,4 +1,5 @@
-import { clipEnd, layerCount, projectEnd, type Clip, type Project } from "./model";
+import { clipEnd, clipSpeed, layerCount, projectEnd, type Clip, type Project } from "./model";
+import { continues as continuesClip } from "./operations";
 
 /** One part of a layer for the export, in the sequence of the timeline: a part of a video file, or a gap. */
 export interface ExportSegment {
@@ -15,7 +16,17 @@ export interface ExportSegment {
    * part's go down. 0 for no crossfade.
    */
   fadeIn: number;
+  /**
+   * The seconds of the file for each second of the part: 0.5 plays at half
+   * speed. The part uses frames / fps * speed seconds of the file from startSec.
+   */
+  speed: number;
+  /** True when the part plays its part of the file from the end to the start. */
+  reversed: boolean;
 }
+
+/** A gap of a layer: no file, no sound. */
+const gapSegment = (frames: number): ExportSegment => ({ path: null, startSec: 0, frames, hasSound: false, fadeIn: 0, speed: 1, reversed: false });
 
 /**
  * The clips of one layer as segments for the export, at the frame rate of
@@ -38,20 +49,24 @@ export function exportSegments(project: Project, fps: number, layer = 0, until =
     const item = media.get(clip.mediaId);
     if (!item) continue;
     const gap = cut(clip.start) - cut(position);
-    if (gap > 0) segments.push({ path: null, startSec: 0, frames: gap, hasSound: false, fadeIn: 0 });
+    if (gap > 0) segments.push(gapSegment(gap));
     const frames = cut(clipEnd(clip)) - cut(clip.start);
-    const continues: boolean = before !== null && gap === 0 && before.mediaId === clip.mediaId
-      && clipEnd(before) === clip.start && before.sourceIn + before.length === clip.sourceIn;
+    const continues: boolean = before !== null && gap === 0 && continuesClip(before, clip);
     const last = segments[segments.length - 1];
     /* A crossfade is shorter than both of its parts. */
     const fadeIn = gap < 0 && before && last?.path ? Math.min(-gap, last.frames - 1, frames - 1) : 0;
-    if (continues && last) last.frames += frames;
-    else if (frames > 0) segments.push({ path: item.path, startSec: clip.sourceIn / project.fps, frames, hasSound: item.hasSound, fadeIn: Math.max(0, fadeIn) });
+    if (continues && last) {
+      last.frames += frames;
+      /* A reversed clip that continues the one before it uses the file before that one's part. */
+      if (clip.reversed) last.startSec = clip.sourceIn / project.fps;
+    } else if (frames > 0) {
+      segments.push({ path: item.path, startSec: clip.sourceIn / project.fps, frames, hasSound: item.hasSound, fadeIn: Math.max(0, fadeIn), speed: clipSpeed(clip), reversed: Boolean(clip.reversed) });
+    }
     position = Math.max(position, clipEnd(clip));
     before = frames > 0 || continues ? clip : null;
   }
   const tail = cut(until) - cut(position);
-  if (tail > 0) segments.push({ path: null, startSec: 0, frames: tail, hasSound: false, fadeIn: 0 });
+  if (tail > 0) segments.push(gapSegment(tail));
   return segments;
 }
 

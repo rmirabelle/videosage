@@ -1,7 +1,7 @@
 import { CaretLeft, CaretRight, Pause, Play, Repeat, SkipBack, SkipForward, SpeakerHigh, SpeakerSlash } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
-import { clipEnd, layerCount, projectEnd, type Clip, type Project } from "../editor/model";
-import { clipAt, fadeAt, topClipAt } from "../editor/operations";
+import { clipEnd, clipSpeed, layerCount, projectEnd, sourceFrameAt, type Clip, type Project } from "../editor/model";
+import { clipAt, continues, fadeAt, topClipAt } from "../editor/operations";
 import { formatTimecode } from "../editor/time";
 
 type Slot = 0 | 1;
@@ -171,7 +171,7 @@ export function Preview({ project, playhead, sources, playing, onPlaying, onPlay
       const slot = lane(layer).active;
       setSource(layer, slot, url);
       /* The middle of the frame, so a rounding error cannot show the frame before. */
-      seek(layer, slot, (clip.sourceIn + frame - clip.start + 0.5) / project.fps);
+      seek(layer, slot, sourceFrameAt(clip, frame - clip.start + 0.5) / project.fps);
       show(layer, slot);
       /* In a crossfade, the other element shows the clip that starts, over this one. */
       const fade = fadeAt(project, frame, layer);
@@ -179,7 +179,7 @@ export function Preview({ project, playhead, sources, playing, onPlaying, onPlay
       if (fade && fadeUrl) {
         const other = (1 - slot) as Slot;
         setSource(layer, other, fadeUrl);
-        seek(layer, other, (fade.in.sourceIn + frame - fade.in.start + 0.5) / project.fps);
+        seek(layer, other, sourceFrameAt(fade.in, frame - fade.in.start + 0.5) / project.fps);
         showFade(layer, other, fade.mix);
       } else showFade(layer, null);
     }
@@ -217,12 +217,30 @@ export function Preview({ project, playhead, sources, playing, onPlaying, onPlay
       const slot = (1 - lane(layer).active) as Slot;
       element(layer, slot)?.pause();
       setSource(layer, slot, url);
-      seek(layer, slot, next.sourceIn / project.fps + 0.001);
+      seek(layer, slot, fileTime(next, next.start));
       state.nextId = next.id;
     };
 
-    /** The time in the clip's file for a frame of the timeline. */
-    const fileTime = (clip: Clip, frame: number) => (clip.sourceIn + frame - clip.start) / latest.current.project.fps + 0.001;
+    /**
+     * The time in the clip's file for a frame of the timeline. A reversed
+     * clip takes the middle of the frame, so its first frame is not past the
+     * end of its part of the file.
+     */
+    const fileTime = (clip: Clip, frame: number) => clip.reversed
+      ? sourceFrameAt(clip, frame - clip.start + 0.5) / latest.current.project.fps
+      : sourceFrameAt(clip, frame - clip.start) / latest.current.project.fps + 0.001;
+
+    /**
+     * Starts an element on a clip: a stretched clip plays at its speed. The
+     * player cannot play a file backward, so a reversed clip does not play:
+     * it seeks to each frame of the clock (with no sound).
+     */
+    const run = (video: HTMLVideoElement | null, clip: Clip) => {
+      if (!video) return;
+      video.playbackRate = clipSpeed(clip);
+      if (clip.reversed) video.pause();
+      else void video.play().catch(() => {});
+    };
 
     /** Starts a clip on a layer at a frame: from the element that holds it ready, or with a seek. */
     const enter = (layer: number, clip: Clip, frame: number) => {
@@ -260,7 +278,7 @@ export function Preview({ project, playhead, sources, playing, onPlaying, onPlay
         if (video) video.currentTime = fileTime(clip, frame);
       }
       state.ready = true;
-      void element(layer, slot)?.play().catch(() => {});
+      run(element(layer, slot), clip);
       show(layer, slot);
       prepareNext(layer, clip);
     };
@@ -295,9 +313,11 @@ export function Preview({ project, playhead, sources, playing, onPlaying, onPlay
         const held = state.nextId === fade.in.id && frame - fade.in.start < 2;
         setSource(layer, other, url);
         if (!held) video.currentTime = fileTime(fade.in, frame);
-        void video.play().catch(() => {});
+        run(video, fade.in);
         info.fadingId = fade.in.id;
         state.nextId = fade.in.id;
+      } else if (fade.in.reversed) {
+        seek(layer, other, fileTime(fade.in, frame));
       } else if (!video.seeking && !video.ended && Math.abs(video.currentTime - fileTime(fade.in, frame)) > DRIFT_LIMIT) {
         video.currentTime = fileTime(fade.in, frame);
       }
@@ -325,6 +345,10 @@ export function Preview({ project, playhead, sources, playing, onPlaying, onPlay
           return;
         }
         const wanted = fileTime(clip, frame);
+        if (clip.reversed) {
+          seek(layer, info.active, wanted);
+          return;
+        }
         if (!lead && video && !video.seeking && !video.ended && Math.abs(video.currentTime - wanted) > DRIFT_LIMIT) video.currentTime = wanted;
         return;
       }
@@ -337,7 +361,7 @@ export function Preview({ project, playhead, sources, playing, onPlaying, onPlay
         return;
       }
       const before = state.clip;
-      if (before && state.ready && video && !video.ended && before.mediaId === clip.mediaId && clipEnd(before) === clip.start && before.sourceIn + before.length === clip.sourceIn) {
+      if (before && state.ready && video && !video.ended && continues(before, clip)) {
         /* The next clip continues the same file (a split with no other change): play on with no seek. */
         state.clip = clip;
         prepareNext(layer, clip);
@@ -381,7 +405,7 @@ export function Preview({ project, playhead, sources, playing, onPlaying, onPlay
         const info = lane(layer);
         const video = element(layer, info.active);
         if (!state?.clip || !state.ready || !video || video.paused || video.ended || info.failed[info.active]) continue;
-        const videoFrame = state.clip.start + (video.currentTime - 0.001) * project.fps - state.clip.sourceIn;
+        const videoFrame = state.clip.start + ((video.currentTime - 0.001) * project.fps - state.clip.sourceIn) / clipSpeed(state.clip);
         if (videoFrame < state.clip.start - 1 || videoFrame > clipEnd(state.clip) + 1) continue;
         frame = Math.max(state.clip.start, videoFrame);
         clock = { frame, wall: performance.now() };

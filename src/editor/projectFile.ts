@@ -1,12 +1,16 @@
-import { clipEnd, type Clip, type MediaItem, type Project } from "./model";
+import { MAX_SPEED, MIN_SPEED, type Clip, type MediaItem, type Project } from "./model";
+import { clipsKeepRules } from "./operations";
 
 /**
  * The .vsage project file: JSON text that holds the project. It holds the
  * paths of the media files, not the videos.
  */
 
-/** Version 2 adds layers. A version 1 file has all its clips on layer 0. */
-export const FILE_VERSION = 2;
+/**
+ * Version 2 adds layers. A version 1 file has all its clips on layer 0.
+ * Version 3 adds the speed and the reverse of a clip.
+ */
+export const FILE_VERSION = 3;
 export const FILE_EXTENSION = "vsage";
 
 export function serializeProject(project: Project): string {
@@ -37,11 +41,16 @@ function readMedia(value: unknown): MediaItem {
 function readClip(value: unknown, mediaIds: Set<string>): Clip {
   if (!isRecord(value) || typeof value.id !== "string" || typeof value.mediaId !== "string"
     || (value.layer !== undefined && (!isWhole(value.layer) || value.layer < 0))
-    || !isWhole(value.start) || value.start < 0 || !isWhole(value.sourceIn) || value.sourceIn < 0 || !isWhole(value.length) || value.length < 1) {
+    || !isWhole(value.start) || value.start < 0 || typeof value.sourceIn !== "number" || !Number.isFinite(value.sourceIn) || value.sourceIn < 0
+    || !isWhole(value.length) || value.length < 1
+    || (value.speed !== undefined && (!isPositive(value.speed) || value.speed < MIN_SPEED || value.speed > MAX_SPEED))) {
     throw new Error("The project file has a clip that is not correct.");
   }
   if (!mediaIds.has(value.mediaId)) throw new Error("The project file has a clip with no media file.");
-  return { id: value.id, mediaId: value.mediaId, layer: typeof value.layer === "number" ? value.layer : 0, start: value.start, sourceIn: value.sourceIn, length: value.length };
+  const clip: Clip = { id: value.id, mediaId: value.mediaId, layer: typeof value.layer === "number" ? value.layer : 0, start: value.start, sourceIn: value.sourceIn, length: value.length };
+  if (typeof value.speed === "number" && value.speed !== 1) clip.speed = value.speed;
+  if (value.reversed === true) clip.reversed = true;
+  return clip;
 }
 
 /** Reads the text of a .vsage file. Throws an Error with a message for the user when the text is not a correct project. */
@@ -60,10 +69,7 @@ export function parseProject(text: string): Project {
   const media = data.media.map(readMedia);
   const mediaIds = new Set(media.map((item) => item.id));
   const clips = data.clips.map((clip) => readClip(clip, mediaIds)).sort((a, b) => a.start - b.start || a.layer - b.layer);
-  const layerEnds = new Map<number, number>();
-  for (const clip of clips) {
-    if (clip.start < (layerEnds.get(clip.layer) ?? 0)) throw new Error("The project file has clips that overlap.");
-    layerEnds.set(clip.layer, clipEnd(clip));
-  }
+  /* Clips on a layer can overlap only in a crossfade. */
+  if (!clipsKeepRules(clips)) throw new Error("The project file has clips that overlap.");
   return { version: FILE_VERSION, fps: data.fps, width: data.width, height: data.height, media, clips };
 }

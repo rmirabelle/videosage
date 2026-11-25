@@ -6,7 +6,7 @@ import { findSnap, snapTargets } from "./snap";
 import { formatTimecode, mediaLength, secondsToFrames } from "./time";
 
 const sample: Project = {
-  version: 2,
+  version: 3,
   fps: 30,
   width: 1920,
   height: 1080,
@@ -14,7 +14,7 @@ const sample: Project = {
   clips: [
     { id: "x", mediaId: "a", layer: 0, start: 10, sourceIn: 0, length: 20 },
     { id: "z", mediaId: "a", layer: 1, start: 15, sourceIn: 0, length: 40 },
-    { id: "y", mediaId: "a", layer: 0, start: 50, sourceIn: 20, length: 30 }
+    { id: "y", mediaId: "a", layer: 0, start: 50, sourceIn: 20.5, length: 30, speed: 0.5, reversed: true }
   ]
 };
 
@@ -96,15 +96,23 @@ describe("project file", () => {
     };
     expect(() => parseProject("not json")).toThrow("not a Video Sage project");
     expect(() => parseProject("[]")).toThrow("not a Video Sage project");
-    expect(() => parseProject(change((data) => { data.version = 3; }))).toThrow("newer version");
+    expect(() => parseProject(change((data) => { data.version = 4; }))).toThrow("newer version");
     expect(() => parseProject(change((data) => { data.fps = 0; }))).toThrow("settings");
     expect(() => parseProject(change((data) => { data.clips[0].length = 0; }))).toThrow("clip");
     expect(() => parseProject(change((data) => { data.clips[0].start = 1.5; }))).toThrow("clip");
     expect(() => parseProject(change((data) => { data.clips[0].mediaId = "none"; }))).toThrow("no media file");
-    expect(() => parseProject(change((data) => { data.clips[2].start = 20; }))).toThrow("overlap");
-    expect(() => parseProject(change((data) => { data.clips[1].layer = 0; }))).toThrow("overlap");
+    expect(() => parseProject(change((data) => { data.clips[2].start = 10; }))).toThrow("overlap");
+    expect(() => parseProject(change((data) => { data.clips[1].layer = 0; data.clips[1].length = 10; }))).toThrow("overlap");
+    expect(() => parseProject(change((data) => { data.clips[2].speed = 0; }))).toThrow("clip");
+    expect(() => parseProject(change((data) => { data.clips[2].speed = 50; }))).toThrow("clip");
     expect(() => parseProject(change((data) => { data.clips[1].layer = -1; }))).toThrow("clip");
     expect(() => parseProject(change((data) => { delete data.media[0].path; }))).toThrow("media entry");
+  });
+
+  it("reads a crossfade: a clip that overlaps a part of the clip before it", () => {
+    const data = JSON.parse(serializeProject(sample));
+    data.clips[2].start = 25;
+    expect(parseProject(JSON.stringify(data)).clips.map((clip) => clip.start)).toEqual([10, 15, 25]);
   });
 
   it("sorts the clips by start", () => {
@@ -118,7 +126,7 @@ describe("project file", () => {
     data.version = 1;
     for (const clip of data.clips) delete clip.layer;
     const read = parseProject(JSON.stringify(data));
-    expect(read.version).toBe(2);
+    expect(read.version).toBe(3);
     expect(read.clips.map((clip) => clip.layer)).toEqual([0, 0]);
   });
 });

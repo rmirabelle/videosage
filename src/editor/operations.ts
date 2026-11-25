@@ -1,4 +1,4 @@
-import { clipEnd, layerCount, newId, type Clip, type ClipboardClip, type MediaItem, type Project } from "./model";
+import { MAX_SPEED, MIN_SPEED, clipEnd, clipSpeed, layerCount, newId, sourceSpan, type Clip, type ClipboardClip, type MediaItem, type Project } from "./model";
 import { mediaLength } from "./time";
 
 /**
@@ -32,6 +32,11 @@ function layerFits(clips: readonly Clip[]): boolean {
     const twoBefore = clips[index - 2];
     return !twoBefore || clip.start >= clipEnd(twoBefore);
   });
+}
+
+/** True when the clips of all layers keep the crossfade rules of Project.clips (for a project file that opens). */
+export function clipsKeepRules(clips: readonly Clip[]): boolean {
+  return [...new Set(clips.map((clip) => clip.layer))].every((layer) => layerFits(clips.filter((clip) => clip.layer === layer).sort(byStart)));
 }
 
 /**
@@ -171,7 +176,11 @@ function splitWhere(project: Project, frame: number, chosen: (clip: Clip) => boo
   return withClips(project, project.clips.flatMap((clip) => {
     if (!cutIds.has(clip.id)) return [clip];
     const firstLength = frame - clip.start;
-    return [{ ...clip, length: firstLength }, { ...clip, id: newId(), start: frame, sourceIn: clip.sourceIn + firstLength, length: clip.length - firstLength }];
+    const secondLength = clip.length - firstLength;
+    const speed = clipSpeed(clip);
+    /* A reversed clip shows the end of its part of the file first. */
+    if (clip.reversed) return [{ ...clip, length: firstLength, sourceIn: clip.sourceIn + secondLength * speed }, { ...clip, id: newId(), start: frame, length: secondLength }];
+    return [{ ...clip, length: firstLength }, { ...clip, id: newId(), start: frame, sourceIn: clip.sourceIn + firstLength * speed, length: secondLength }];
   }));
 }
 
@@ -188,7 +197,9 @@ export function splitAt(project: Project, frame: number, selected: ReadonlySet<s
 }
 
 /** True when two clips touch on the same layer and the second continues the first in the same media file. */
-const continues = (a: Clip, b: Clip) => a.layer === b.layer && a.mediaId === b.mediaId && clipEnd(a) === b.start && a.sourceIn + a.length === b.sourceIn;
+export const continues = (a: Clip, b: Clip) => a.layer === b.layer && a.mediaId === b.mediaId && clipEnd(a) === b.start
+  && clipSpeed(a) === clipSpeed(b) && Boolean(a.reversed) === Boolean(b.reversed)
+  && (a.reversed ? b.sourceIn + sourceSpan(b) === a.sourceIn : a.sourceIn + sourceSpan(a) === b.sourceIn);
 
 const selectedInOrder = (project: Project, ids: ReadonlySet<string>) => project.clips.filter((clip) => ids.has(clip.id)).sort(byStart);
 
@@ -202,7 +213,9 @@ export function canJoin(project: Project, ids: ReadonlySet<string>): boolean {
 export function joinClips(project: Project, ids: ReadonlySet<string>): Project {
   if (!canJoin(project, ids)) return project;
   const selected = selectedInOrder(project, ids);
-  const joined: Clip = { ...selected[0], length: selected.reduce((sum, clip) => sum + clip.length, 0) };
+  /* A reversed clip starts in the file where its last part starts. */
+  const sourceIn = selected[0].reversed ? selected[selected.length - 1].sourceIn : selected[0].sourceIn;
+  const joined: Clip = { ...selected[0], sourceIn, length: selected.reduce((sum, clip) => sum + clip.length, 0) };
   return withClips(project, project.clips.flatMap((clip) => clip.id === joined.id ? [joined] : ids.has(clip.id) ? [] : [clip]));
 }
 
@@ -243,22 +256,119 @@ export function deleteClips(project: Project, ids: ReadonlySet<string>): Project
  * at the end of the clip before it on its layer, at the first frame of the
  * media file, and one frame before the clip's end. In a crossfade with the
  * clip before it, the start can make the crossfade longer or shorter, in
- * the rules of Project.clips.
+ * the rules of Project.clips. The start of a reversed clip shows the end
+ * of its part of the file, so there the start stops at the file's end.
  */
 export function trimStart(project: Project, id: string, newStart: number): Project {
   const clip = project.clips.find((other) => other.id === id);
   if (!clip) return project;
-  const clips = layerClips(project, clip.layer);
-  const index = clips.indexOf(clip);
-  const [twoBefore, before, after] = [clips[index - 2], clips[index - 1], clips[index + 1]];
-  const previousEnd = !before ? 0 : fadeLength(before, clip) > 0 ? Math.max(before.start + 1, twoBefore ? clipEnd(twoBefore) : 0) : clipEnd(before);
-  const lowest = Math.max(previousEnd, clip.start - clip.sourceIn);
-  const highest = Math.min(clipEnd(clip) - 1, after && fadeLength(clip, after) > 0 ? after.start - 1 : Infinity);
+  const speed = clipSpeed(clip);
+  const room = clip.reversed ? mediaFrames(project, clip) - clip.sourceIn - sourceSpan(clip) : clip.sourceIn;
+  const { lowest: neighbor, highest } = startLimits(project, clip);
+  const lowest = Math.max(neighbor, clip.start - wholeFrames(room / speed));
   const start = Math.min(Math.max(Math.round(newStart), lowest), highest);
   if (start === clip.start) return project;
   const change = start - clip.start;
-  const trimmed: Clip = { ...clip, start, sourceIn: clip.sourceIn + change, length: clip.length - change };
+  const sourceIn = clip.reversed ? clip.sourceIn : Math.max(0, clip.sourceIn + change * speed);
+  const trimmed: Clip = { ...clip, start, sourceIn, length: clip.length - change };
   return withClips(project, project.clips.map((other) => other.id === id ? trimmed : other));
+}
+
+/** The whole frames in a number of frames; a rounding error just under a whole number counts as that number. */
+const wholeFrames = (frames: number) => Math.max(0, Math.floor(frames + 1e-6));
+
+/** The number of frames of a clip's media file, at the project frame rate. */
+const mediaFrames = (project: Project, clip: Clip) => {
+  const media = project.media.find((item) => item.id === clip.mediaId);
+  return media ? mediaLength(media, project.fps) : Infinity;
+};
+
+/** Where the start of a clip can go for its neighbors on its layer (see trimStart). */
+function startLimits(project: Project, clip: Clip): { lowest: number; highest: number } {
+  const clips = layerClips(project, clip.layer);
+  const index = clips.indexOf(clip);
+  const [twoBefore, before, after] = [clips[index - 2], clips[index - 1], clips[index + 1]];
+  const lowest = !before ? 0 : fadeLength(before, clip) > 0 ? Math.max(before.start + 1, twoBefore ? clipEnd(twoBefore) : 0) : clipEnd(before);
+  const highest = Math.min(clipEnd(clip) - 1, after && fadeLength(clip, after) > 0 ? after.start - 1 : Infinity);
+  return { lowest, highest };
+}
+
+/** Where the end of a clip can go for its neighbors on its layer (see trimEnd). */
+function endLimits(project: Project, clip: Clip): { lowest: number; highest: number } {
+  const clips = layerClips(project, clip.layer);
+  const index = clips.indexOf(clip);
+  const [before, after, twoAfter] = [clips[index - 1], clips[index + 1], clips[index + 2]];
+  const highest = !after ? Infinity : fadeLength(clip, after) > 0 ? Math.min(clipEnd(after) - 1, twoAfter ? twoAfter.start : Infinity) : after.start;
+  const lowest = Math.max(clip.start + 1, before && fadeLength(before, clip) > 0 ? clipEnd(before) + 1 : 0);
+  return { lowest, highest };
+}
+
+/** A clip with a new length for the same part of its media file: its speed changes. */
+const stretched = (clip: Clip, start: number, length: number): Clip => {
+  const speed = sourceSpan(clip) / length;
+  const { speed: _old, ...rest } = clip;
+  return Math.abs(speed - 1) < 1e-9 ? { ...rest, start, length } : { ...rest, start, length, speed };
+};
+
+/** The lengths that a stretch can give a clip: its speed stays from MIN_SPEED to MAX_SPEED. */
+const stretchLengths = (clip: Clip) => ({ shortest: Math.max(1, Math.ceil(sourceSpan(clip) / MAX_SPEED - 1e-6)), longest: wholeFrames(sourceSpan(clip) / MIN_SPEED) });
+
+/**
+ * Moves the start of a clip and keeps its end, but the clip keeps all of
+ * its part of the media file: a longer clip plays slower, a shorter one
+ * faster. The start stops at the clip's neighbors (as in trimStart) and at
+ * the slowest and the fastest speed.
+ */
+export function stretchStart(project: Project, id: string, newStart: number): Project {
+  const clip = project.clips.find((other) => other.id === id);
+  if (!clip) return project;
+  const { lowest, highest } = startLimits(project, clip);
+  const { shortest, longest } = stretchLengths(clip);
+  const end = clipEnd(clip);
+  const start = Math.min(Math.max(Math.round(newStart), lowest, end - longest), highest, end - shortest);
+  if (start === clip.start) return project;
+  return withClips(project, project.clips.map((other) => other.id === id ? stretched(clip, start, end - start) : other));
+}
+
+/** Moves the end of a clip and keeps its start, and changes its speed (see stretchStart). */
+export function stretchEnd(project: Project, id: string, newEnd: number): Project {
+  const clip = project.clips.find((other) => other.id === id);
+  if (!clip) return project;
+  const { lowest, highest } = endLimits(project, clip);
+  const { shortest, longest } = stretchLengths(clip);
+  const end = Math.max(Math.min(Math.round(newEnd), highest, clip.start + longest), lowest, clip.start + shortest);
+  if (end === clipEnd(clip)) return project;
+  return withClips(project, project.clips.map((other) => other.id === id ? stretched(clip, clip.start, end - clip.start) : other));
+}
+
+/** Reverses the clips: each one plays its part of the media file the other way. Doing it again plays them forward. */
+export function reverseClips(project: Project, ids: ReadonlySet<string>): Project {
+  if (!project.clips.some((clip) => ids.has(clip.id))) return project;
+  return { ...project, clips: project.clips.map((clip) => {
+    if (!ids.has(clip.id)) return clip;
+    const { reversed: _old, ...rest } = clip;
+    return clip.reversed ? rest : { ...rest, reversed: true };
+  }) };
+}
+
+/**
+ * Gives the clips their normal speed again. Each clip keeps its start and
+ * its part of the media file, so its length changes. If the clip after it
+ * leaves too little room, the clip's end stops there (and the clip uses less
+ * of its file).
+ */
+export function normalSpeed(project: Project, ids: ReadonlySet<string>): Project {
+  let next = project;
+  for (const clip of project.clips.filter((other) => ids.has(other.id) && clipSpeed(other) !== 1)) {
+    const current = next.clips.find((other) => other.id === clip.id)!;
+    const { highest } = endLimits(next, current);
+    const length = Math.max(1, Math.min(Math.round(sourceSpan(current)), highest - current.start));
+    const { speed: _old, ...rest } = current;
+    /* A reversed clip shows the end of its part first; when the clip gets shorter, that end stays. */
+    const sourceIn = current.reversed ? current.sourceIn + sourceSpan(current) - length : current.sourceIn;
+    next = withClips(next, next.clips.map((other) => other.id === clip.id ? { ...rest, sourceIn: Math.max(0, sourceIn), length } : other));
+  }
+  return next;
 }
 
 /**
@@ -271,16 +381,16 @@ export function trimStart(project: Project, id: string, newStart: number): Proje
 export function trimEnd(project: Project, id: string, newEnd: number): Project {
   const clip = project.clips.find((other) => other.id === id);
   if (!clip) return project;
-  const media = project.media.find((item) => item.id === clip.mediaId);
-  const clips = layerClips(project, clip.layer);
-  const index = clips.indexOf(clip);
-  const [before, after, twoAfter] = [clips[index - 1], clips[index + 1], clips[index + 2]];
-  const nextStart = !after ? Infinity : fadeLength(clip, after) > 0 ? Math.min(clipEnd(after) - 1, twoAfter ? twoAfter.start : Infinity) : after.start;
-  const mediaEnd = media ? clip.start + mediaLength(media, project.fps) - clip.sourceIn : Infinity;
-  const lowest = Math.max(clip.start + 1, before && fadeLength(before, clip) > 0 ? clipEnd(before) + 1 : 0);
-  const end = Math.max(Math.min(Math.round(newEnd), nextStart, mediaEnd), lowest);
+  const speed = clipSpeed(clip);
+  const { lowest, highest } = endLimits(project, clip);
+  /* The end of a reversed clip shows the start of its part of the file, so there the end stops at the file's start. */
+  const room = clip.reversed ? clip.sourceIn : mediaFrames(project, clip) - clip.sourceIn - sourceSpan(clip);
+  const mediaEnd = clipEnd(clip) + wholeFrames(room / speed);
+  const end = Math.max(Math.min(Math.round(newEnd), highest, mediaEnd), lowest);
   if (end === clipEnd(clip)) return project;
-  return withClips(project, project.clips.map((other) => other.id === id ? { ...clip, length: end - clip.start } : other));
+  const change = end - clipEnd(clip);
+  const sourceIn = clip.reversed ? Math.max(0, clip.sourceIn - change * speed) : clip.sourceIn;
+  return withClips(project, project.clips.map((other) => other.id === id ? { ...clip, sourceIn, length: end - clip.start } : other));
 }
 
 /**
@@ -303,12 +413,15 @@ export function closeGaps(project: Project, layers?: ReadonlySet<number>): Proje
   return changed ? withClips(project, clips) : project;
 }
 
+/** The speed and the reverse of a clip, only where they are not the normal ones. */
+const speedAndReverse = (clip: { speed?: number; reversed?: boolean }) => ({ ...(clip.speed !== undefined && clip.speed !== 1 ? { speed: clip.speed } : {}), ...(clip.reversed ? { reversed: true } : {}) });
+
 /** The selected clips for the clipboard, with positions relative to the first one. */
 export function copyClips(project: Project, ids: ReadonlySet<string>): ClipboardClip[] {
   const selected = selectedInOrder(project, ids);
   if (selected.length === 0) return [];
   const origin = selected[0].start;
-  return selected.map((clip) => ({ mediaId: clip.mediaId, layer: clip.layer, offset: clip.start - origin, sourceIn: clip.sourceIn, length: clip.length }));
+  return selected.map((clip) => ({ mediaId: clip.mediaId, layer: clip.layer, offset: clip.start - origin, sourceIn: clip.sourceIn, length: clip.length, ...speedAndReverse(clip) }));
 }
 
 /**
@@ -338,7 +451,7 @@ export function pasteClips(project: Project, clipboard: readonly ClipboardClip[]
     const firstLater = Math.min(...base.clips.filter((clip) => clip.layer === layer && clip.start >= frame).map((clip) => clip.start));
     shifts.set(layer, Number.isFinite(firstLater) ? Math.max(0, frame + span - firstLater) : 0);
   }
-  const pasted: Clip[] = usable.map((item) => ({ id: newId(), mediaId: item.mediaId, layer: item.layer, start: frame + item.offset - origin, sourceIn: item.sourceIn, length: item.length }));
+  const pasted: Clip[] = usable.map((item) => ({ id: newId(), mediaId: item.mediaId, layer: item.layer, start: frame + item.offset - origin, sourceIn: item.sourceIn, length: item.length, ...speedAndReverse(item) }));
   const kept = base.clips.map((clip) => {
     const shift = clip.start >= frame ? shifts.get(clip.layer) ?? 0 : 0;
     return shift > 0 ? { ...clip, start: clip.start + shift } : clip;
@@ -395,7 +508,7 @@ export function relinkMedia(project: Project, mediaId: string, found: MediaItem)
   if (project.media.some((item) => item.id !== mediaId && item.path === found.path)) return null;
   const next = { ...found, id: mediaId };
   const length = mediaLength(next, project.fps);
-  if (project.clips.some((clip) => clip.mediaId === mediaId && clip.sourceIn + clip.length > length)) return null;
+  if (project.clips.some((clip) => clip.mediaId === mediaId && clip.sourceIn + sourceSpan(clip) > length + 1e-6)) return null;
   return { ...project, media: project.media.map((item) => item.id === mediaId ? next : item) };
 }
 

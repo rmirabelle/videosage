@@ -12,10 +12,10 @@ describe("exportSegments", () => {
   it("gives the clips and the gaps in the sequence of the timeline", () => {
     const segments = exportSegments(project(clip("y", 100, 60, 0, "b"), clip("x", 30, 45, 15)), 30);
     expect(segments).toEqual([
-      { path: null, startSec: 0, frames: 30, hasSound: false, fadeIn: 0 },
-      { path: "C:\\Videos\\a.mp4", startSec: 0.5, frames: 45, hasSound: true, fadeIn: 0 },
-      { path: null, startSec: 0, frames: 25, hasSound: false, fadeIn: 0 },
-      { path: "C:\\Videos\\b.mp4", startSec: 0, frames: 60, hasSound: false, fadeIn: 0 }
+      { path: null, startSec: 0, frames: 30, hasSound: false, fadeIn: 0, speed: 1, reversed: false },
+      { path: "C:\\Videos\\a.mp4", startSec: 0.5, frames: 45, hasSound: true, fadeIn: 0, speed: 1, reversed: false },
+      { path: null, startSec: 0, frames: 25, hasSound: false, fadeIn: 0, speed: 1, reversed: false },
+      { path: "C:\\Videos\\b.mp4", startSec: 0, frames: 60, hasSound: false, fadeIn: 0, speed: 1, reversed: false }
     ]);
   });
 
@@ -34,6 +34,17 @@ describe("exportSegments", () => {
 
   it("gives no segments for an empty timeline", () => {
     expect(exportSegments(project(), 30)).toEqual([]);
+  });
+
+  it("gives the speed and the reverse of a clip", () => {
+    const slow = { ...clip("x", 0, 200, 30), speed: 0.5, reversed: true };
+    const [segment] = exportSegments(project(slow), 30);
+    expect(segment).toMatchObject({ startSec: 1, frames: 200, speed: 0.5, reversed: true });
+    /* The two parts of a split reversed clip are one part again, from the start of the file part. */
+    const parts = [{ ...clip("x", 0, 100, 80), reversed: true }, { ...clip("y", 100, 100, 30), speed: 0.5, reversed: true }];
+    expect(exportSegments(project(...parts), 30)).toHaveLength(2);
+    const split = [{ ...clip("x", 0, 40, 60), reversed: true }, { ...clip("y", 40, 60, 0), reversed: true }];
+    expect(exportSegments(project(...split), 30)).toEqual([{ path: "C:\\Videos\\a.mp4", startSec: 0, frames: 100, hasSound: true, fadeIn: 0, speed: 1, reversed: true }]);
   });
 
   it("gives a crossfade as the overlap of a clip with the clip before it", () => {

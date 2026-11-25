@@ -30,10 +30,41 @@ export interface Clip {
   layer: number;
   /** The first frame of the clip on the track. */
   start: number;
-  /** The first frame that the clip uses from its media file. */
+  /**
+   * The first frame that the clip uses from its media file. It can have a
+   * fraction when the clip's speed is not 1.
+   */
   sourceIn: number;
-  /** The number of frames; 1 or more. */
+  /** The number of frames on the timeline; 1 or more. */
   length: number;
+  /**
+   * The frames of the media file for each frame of the timeline: 0.5 plays
+   * at half speed (the clip is two times longer), 2 at double speed. No
+   * value means 1. The clip uses the media file from sourceIn for
+   * length * speed frames.
+   */
+  speed?: number;
+  /** True when the clip plays its part of the media file from the end to the start. */
+  reversed?: boolean;
+}
+
+/** The slowest and the fastest speed of a clip. */
+export const MIN_SPEED = 0.1;
+export const MAX_SPEED = 10;
+
+export const clipSpeed = (clip: { speed?: number }) => clip.speed ?? 1;
+
+/** The number of media file frames that the clip uses. */
+export const sourceSpan = (clip: Clip) => clip.length * clipSpeed(clip);
+
+/**
+ * The frame of the media file (it can have a fraction) at a place in the
+ * clip: "at" goes from 0 (the clip's start) to its length (the clip's end).
+ * A reversed clip goes from the end of its part of the file to the start.
+ */
+export function sourceFrameAt(clip: Clip, at: number): number {
+  const speed = clipSpeed(clip);
+  return clip.reversed ? clip.sourceIn + (clip.length - at) * speed : clip.sourceIn + at * speed;
 }
 
 export interface Project {
@@ -57,12 +88,14 @@ export interface ClipboardClip {
   offset: number;
   sourceIn: number;
   length: number;
+  speed?: number;
+  reversed?: boolean;
 }
 
 export const DEFAULT_FPS = 30;
 
 export function emptyProject(): Project {
-  return { version: 2, fps: DEFAULT_FPS, width: 1920, height: 1080, media: [], clips: [] };
+  return { version: 3, fps: DEFAULT_FPS, width: 1920, height: 1080, media: [], clips: [] };
 }
 
 /** The frame after the last frame of the clip. */

@@ -40,6 +40,49 @@ pub struct Segment {
     /** The frames that this part overlaps the end of the part before it (a crossfade); 0 for none. */
     #[serde(default)]
     pub fade_in: u64,
+    /** The seconds of the file for each second of the part: 0.5 plays at half speed. */
+    #[serde(default = "normal_speed")]
+    pub speed: f64,
+    /** True when the part plays its part of the file from the end to the start. */
+    #[serde(default)]
+    pub reversed: bool,
+}
+
+fn normal_speed() -> f64 {
+    1.0
+}
+
+impl Segment {
+    /** True when the part plays at normal speed and forward: the graph needs no speed or reverse filters. */
+    fn is_plain(&self) -> bool {
+        (self.speed - 1.0).abs() < 1e-9 && !self.reversed
+    }
+
+    /** The seconds of the file that the part uses. */
+    fn source_seconds(&self, fps: f64) -> f64 {
+        self.frames as f64 / fps * self.speed
+    }
+}
+
+/**
+ * The "atempo" filters for a speed. One atempo filter takes from 0.5 to 2,
+ * so a speed outside that range takes more than one.
+ */
+fn tempo_filters(speed: f64) -> String {
+    let mut left = speed;
+    let mut filters = Vec::new();
+    while left < 0.5 {
+        filters.push("atempo=0.5".to_string());
+        left /= 0.5;
+    }
+    while left > 2.0 {
+        filters.push("atempo=2.0".to_string());
+        left /= 2.0;
+    }
+    if (left - 1.0).abs() > 1e-9 {
+        filters.push(format!("atempo={left:.6}"));
+    }
+    filters.iter().map(|filter| format!("{filter},")).collect()
 }
 
 #[derive(Debug, Deserialize)]
@@ -124,13 +167,27 @@ fn build_graph(request: &ExportRequest) -> String {
                 } else {
                     format!("format=yuva420p,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:{fill},setsar=1")
                 };
+                /*
+                 * A stretched or reversed part first cuts its exact part of the
+                 * file; "reverse" turns it around, and setpts makes it slower or faster.
+                 */
+                let (video_timing, sound_timing) = if segment.is_plain() {
+                    (String::new(), String::new())
+                } else {
+                    let source = segment.source_seconds(request.fps);
+                    let (reverse, areverse) = if segment.reversed { ("reverse,", "areverse,") } else { ("", "") };
+                    (
+                        format!("trim=duration={source:.6},setpts=PTS-STARTPTS,{reverse}setpts=PTS/{:.6},", segment.speed),
+                        format!("atrim=duration={source:.6},asetpts=PTS-STARTPTS,{areverse}{}", tempo_filters(segment.speed)),
+                    )
+                };
                 parts.push(format!(
-                    "[{input}:v:0]fps={rate},scale={width}:{height}:force_original_aspect_ratio=decrease:flags=lanczos,\
+                    "[{input}:v:0]{video_timing}fps={rate},scale={width}:{height}:force_original_aspect_ratio=decrease:flags=lanczos,\
                      {pad},tpad=stop_mode=clone:stop=-1,trim=end_frame={frames},setpts=PTS-STARTPTS[v{index}]"
                 ));
                 if segment.has_sound {
                     parts.push(format!(
-                        "[{input}:a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,\
+                        "[{input}:a:0]{sound_timing}aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,\
                          apad,atrim=end={seconds:.6},asetpts=PTS-STARTPTS[a{index}]"
                     ));
                 } else {
@@ -221,7 +278,7 @@ fn build_args(request: &ExportRequest, graph_file: &Path, encoder: &[String], ou
     for segment in request.segments() {
         let Some(path) = &segment.path else { continue };
         /* FFmpeg reads one second more than the segment, and the graph cuts the exact length. */
-        let seconds = segment.frames as f64 / request.fps + 1.0;
+        let seconds = segment.source_seconds(request.fps) + 1.0;
         args.extend(["-ss".into(), format!("{:.6}", segment.start_sec.max(0.0)).into(), "-t".into(), format!("{seconds:.6}").into(), "-i".into(), path.into()]);
     }
     args.extend(["-/filter_complex".into(), graph_file.into(), "-map".into(), "[v]".into(), "-map".into(), "[a]".into()]);
@@ -415,7 +472,7 @@ mod tests {
     use std::process::Command;
 
     fn clip(path: &str, start_sec: f64, frames: u64, has_sound: bool) -> Segment {
-        Segment { path: Some(path.into()), start_sec, frames, has_sound, fade_in: 0 }
+        Segment { path: Some(path.into()), start_sec, frames, has_sound, fade_in: 0, speed: 1.0, reversed: false }
     }
 
     /** A clip that overlaps the end of the clip before it by "fade_in" frames. */
@@ -424,7 +481,7 @@ mod tests {
     }
 
     fn gap(frames: u64) -> Segment {
-        Segment { path: None, start_sec: 0.0, frames, has_sound: false, fade_in: 0 }
+        Segment { path: None, start_sec: 0.0, frames, has_sound: false, fade_in: 0, speed: 1.0, reversed: false }
     }
 
     fn request(segments: Vec<Segment>) -> ExportRequest {
@@ -473,6 +530,18 @@ mod tests {
         assert!(graph.contains("[lv0][lv1]overlay=format=auto:eof_action=pass[over]"));
         assert!(graph.contains("[over]format=yuv420p[v]"));
         assert!(graph.ends_with("[la0][la1]amix=inputs=2:normalize=0:duration=longest[a]"));
+    }
+
+    #[test]
+    fn a_stretched_or_reversed_part_cuts_its_file_part_and_changes_its_time() {
+        let slow = Segment { speed: 0.25, reversed: true, ..clip("a.mp4", 2.0, 60, true) };
+        let graph = build_graph(&request(vec![slow, clip("b.mp4", 0.0, 30, true)]));
+        /* 60 frames at a quarter speed use 0.5 s of the file. */
+        assert!(graph.contains("[0:v:0]trim=duration=0.500000,setpts=PTS-STARTPTS,reverse,setpts=PTS/0.250000,fps=30,"));
+        assert!(graph.contains("[0:a:0]atrim=duration=0.500000,asetpts=PTS-STARTPTS,areverse,atempo=0.5,atempo=0.500000,aresample=48000"));
+        assert!(graph.contains("[1:v:0]fps=30,"));
+        assert_eq!(tempo_filters(1.0), "");
+        assert_eq!(tempo_filters(3.0), "atempo=2.0,atempo=1.500000,");
     }
 
     #[test]
@@ -602,6 +671,34 @@ mod tests {
         assert_eq!(probe(&output, "v:0", "stream=nb_read_frames", true), "90");
         let sound_seconds: f64 = probe(&output, "a:0", "stream=duration", false).parse().unwrap();
         assert!((sound_seconds - 3.0).abs() < 0.05, "{sound_seconds}");
+    }
+
+    #[test]
+    #[ignore = "needs src-tauri/ffmpeg/ffmpeg.exe and ffprobe.exe"]
+    fn a_real_export_with_speed_and_reverse_has_the_exact_number_of_frames() {
+        let folder = tempfile::tempdir().unwrap();
+        let wide = folder.path().join("wide.mp4");
+        make_video(&wide, "640x360", "30", "3", true);
+        let output = folder.path().join("speed.mp4");
+        let wide = wide.to_string_lossy().into_owned();
+        let request = ExportRequest {
+            output: output.to_string_lossy().into_owned(),
+            width: 640,
+            height: 360,
+            fps: 30.0,
+            quality: "standard".into(),
+            layers: vec![vec![
+                /* 1 s of the file at half speed: 60 frames. Then 1 s reversed at normal speed, 2 s at double speed and 0.3 s at a tenth. */
+                Segment { speed: 0.5, ..clip(&wide, 0.0, 60, true) },
+                Segment { reversed: true, ..clip(&wide, 1.0, 30, true) },
+                Segment { speed: 2.0, reversed: true, ..faded(&wide, 0.5, 30, 10) },
+                Segment { speed: 0.1, ..clip(&wide, 2.0, 90, true) },
+            ]],
+        };
+        run_export(&real("ffmpeg.exe"), &request, folder.path(), &|_| {}).unwrap();
+        assert_eq!(probe(&output, "v:0", "stream=nb_read_frames", true), "200");
+        let sound_seconds: f64 = probe(&output, "a:0", "stream=duration", false).parse().unwrap();
+        assert!((sound_seconds - 200.0 / 30.0).abs() < 0.05, "{sound_seconds}");
     }
 
     #[test]

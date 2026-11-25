@@ -2,7 +2,7 @@ import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { save } from "@tauri-apps/plugin-dialog";
-import { ArrowLineLeft, Check, Copy, Export, Repeat, Scissors, Trash } from "@phosphor-icons/react";
+import { ArrowCounterClockwise, ArrowLineLeft, Check, Copy, Export, Gauge, Repeat, Scissors, Trash } from "@phosphor-icons/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AboutDialog } from "./components/AboutDialog";
 import { ConfirmDialog } from "./components/ConfirmDialog";
@@ -17,8 +17,8 @@ import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { Timeline, type TimelineHandle } from "./components/Timeline";
 import { TitleBar } from "./components/TitleBar";
 import { canRedo, canUndo, record, redo, startHistory, undo } from "./editor/history";
-import { clipEnd, emptyProject, projectEnd, type ClipboardClip, type MediaItem, type Project } from "./editor/model";
-import { addMedia, canJoin, closeGaps, compactLayers, copyClips, importPlacement, placeImport, deleteClips, insertMedia, joinClips, pasteClips, relinkMedia, removeMedia, selectionProject, selectionRange, splitAt } from "./editor/operations";
+import { clipEnd, clipSpeed, emptyProject, projectEnd, type ClipboardClip, type MediaItem, type Project } from "./editor/model";
+import { addMedia, canJoin, closeGaps, compactLayers, copyClips, importPlacement, placeImport, deleteClips, insertMedia, joinClips, normalSpeed, pasteClips, reverseClips, relinkMedia, removeMedia, selectionProject, selectionRange, splitAt } from "./editor/operations";
 import { FILE_EXTENSION, parseProject, serializeProject } from "./editor/projectFile";
 import { probeMedia, VIDEO_EXTENSIONS } from "./lib/media";
 import { addRecentProject, missingFiles, readProjectFile, recentProjects, writeProjectFile } from "./lib/projects";
@@ -400,6 +400,8 @@ export default function App() {
     selectAll: { can: project.clips.length > 0, run: () => setSelection(new Set(project.clips.map((clip) => clip.id))) },
     split: { can: canSplit, run: () => edit((current) => splitAt(current, playhead, selection)) },
     join: { can: canJoin(project, selection), run: () => edit((current) => joinClips(current, selection)) },
+    reverse: { can: hasSelection, run: () => edit((current) => reverseClips(current, selection)) },
+    normalSpeed: { can: project.clips.some((clip) => selection.has(clip.id) && clipSpeed(clip) !== 1), run: () => edit((current) => normalSpeed(current, selection)) },
     closeGaps: { can: closeGaps(project, selectedLayers) !== project, run: () => edit((current) => closeGaps(current, selectedLayers)) },
     toggleSnapping: { can: true, run: () => setSnapping((current) => !current) },
     togglePlay: { can: end > 0, run: () => setPlaying((current) => !current) },
@@ -546,6 +548,7 @@ export default function App() {
       else if (plain && key === "n") run("toggleSnapping");
       else if (plain && key === " ") run("togglePlay");
       else if (plain && key === "l") run("toggleLoop");
+      else if (plain && key === "r") run("reverse");
       else if (ctrl && (key === "=" || key === "+")) timelineRef.current?.zoomIn();
       else if (ctrl && key === "-") timelineRef.current?.zoomOut();
       else if (ctrl && key === "0") timelineRef.current?.zoomToFit();
@@ -599,6 +602,8 @@ export default function App() {
     contextItem("Go to Start of Selection", <ArrowLineLeft size={15} />, "Shift+Home", "goToSelectionStart"),
     "separator",
     contextItem("Split at Playhead", <Scissors size={15} />, "S", "split"),
+    contextItem("Reverse", <ArrowCounterClockwise size={15} />, "R", "reverse"),
+    contextItem("Normal Speed", <Gauge size={15} />, undefined, "normalSpeed"),
     contextItem("Copy", <Copy size={15} />, "Ctrl+C", "copy"),
     contextItem("Delete", <Trash size={15} />, "Del", "delete", true)
   ];
@@ -670,7 +675,10 @@ export default function App() {
         "separator",
         item("Split at Playhead", "S", "split"),
         item("Join Clips", "Ctrl+J", "join"),
-        item("Close Gaps", undefined, "closeGaps")
+        item("Close Gaps", undefined, "closeGaps"),
+        "separator",
+        item("Reverse", "R", "reverse"),
+        item("Normal Speed", undefined, "normalSpeed")
       ]
     },
     {

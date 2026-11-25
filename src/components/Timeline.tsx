@@ -1,7 +1,7 @@
-import { ArrowsOutLineHorizontal, MagnifyingGlassMinus, MagnifyingGlassPlus, Magnet, Scissors } from "@phosphor-icons/react";
+import { ArrowCounterClockwise, ArrowsOutLineHorizontal, MagnifyingGlassMinus, MagnifyingGlassPlus, Magnet, Scissors } from "@phosphor-icons/react";
 import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { clipEnd, layerCount, projectEnd, type Clip, type MediaItem, type Project } from "../editor/model";
-import { fadeIns, moveClips, trimEnd, trimStart } from "../editor/operations";
+import { clipEnd, clipSpeed, layerCount, projectEnd, type Clip, type MediaItem, type Project } from "../editor/model";
+import { fadeIns, moveClips, stretchEnd, stretchStart, trimEnd, trimStart } from "../editor/operations";
 import { rulerLabel, rulerSteps } from "../editor/ruler";
 import { findSnap, snapTargets } from "../editor/snap";
 import { formatTimecode } from "../editor/time";
@@ -51,7 +51,7 @@ interface Props {
 type Press =
   | { kind: "box"; startX: number; startY: number; startFrame: number; startLayer: number; dragging: boolean; before: ReadonlySet<string> }
   | {
-    kind: "move" | "trimStart" | "trimEnd";
+    kind: "move" | "trimStart" | "trimEnd" | "stretchStart" | "stretchEnd";
     clipId: string;
     startX: number;
     startFrame: number;
@@ -111,27 +111,43 @@ const ClipView = memo(function ClipView({ clip, media, fps, zoom, selected, fade
      * split cuts it: the pictures always agree with what the clip holds.
      * The grid is 1, 2, 4, 8 ... seconds (or parts of a second), so a zoom
      * change uses the same pictures again. A tile is from half a picture to
-     * one picture wide.
+     * one picture wide. A stretched clip stretches the film too, and a
+     * reversed clip shows the film from its end to its start.
      */
-    const grid = 2 ** Math.floor(Math.log2(pictureWidth / zoom / fps));
-    tileWidth = grid * fps * zoom;
-    /* The place of the clip's left side on the film, in pixels. */
-    const filmLeft = clip.sourceIn * zoom;
-    const from = filmLeft + Math.max(0, viewLeft - left);
-    const to = filmLeft + Math.min(width, viewRight - left);
+    const scale = zoom / clipSpeed(clip);
+    const grid = 2 ** Math.floor(Math.log2(pictureWidth / scale / fps));
+    tileWidth = grid * fps * scale;
+    /* The film's place, in pixels, at the clip's left side (or at its right side for a reversed clip). */
+    const filmLeft = clip.sourceIn * scale;
+    const filmEnd = filmLeft + width;
+    const shownFrom = Math.max(0, viewLeft - left);
+    const shownTo = Math.min(width, viewRight - left);
+    const from = clip.reversed ? filmEnd - shownTo : filmLeft + shownFrom;
+    const to = clip.reversed ? filmEnd - shownFrom : filmLeft + shownTo;
     const first = Math.floor(from / tileWidth);
     const last = Math.min(Math.ceil(to / tileWidth) - 1, first + 240);
     for (let index = first; index <= last; index++) {
-      tiles.push({ index, atSec: Math.max(0, Math.min(index * grid, media.durationSec - 0.1)), left: index * tileWidth - filmLeft });
+      const tileLeft = clip.reversed ? filmEnd - (index + 1) * tileWidth : index * tileWidth - filmLeft;
+      tiles.push({ index, atSec: Math.max(0, Math.min(index * grid, media.durationSec - 0.1)), left: tileLeft });
     }
   }
+  const speed = clipSpeed(clip);
+  const speedText = speed === 1 ? null : `${Math.round(speed * 100)}%`;
   return (
     <div
       className={`clip ${selected ? "selected" : ""} ${dragging ? "dragging" : ""}`}
       data-clip-id={clip.id}
       style={{ left, width, "--clip-hue": mediaHue(clip.mediaId) } as React.CSSProperties}
     >
-      <div className="clip-name">{media?.name ?? "Missing media"}</div>
+      <div className="clip-name">
+        {(clip.reversed || speedText) && (
+          <span className="clip-badges" title={[clip.reversed ? "Reversed" : "", speedText ? `Speed ${speedText}` : ""].filter(Boolean).join(", ")}>
+            {clip.reversed && <ArrowCounterClockwise size={10} weight="bold" />}
+            {speedText}
+          </span>
+        )}
+        {media?.name ?? "Missing media"}
+      </div>
       <div className="clip-strip">
         {media && tiles.map((tile) => <StripTile key={tile.index} path={media.path} atSec={tile.atSec} left={tile.left} width={tileWidth} />)}
       </div>
@@ -141,9 +157,9 @@ const ClipView = memo(function ClipView({ clip, media, fps, zoom, selected, fade
           {fadeIn * zoom >= 44 && <span>{(fadeIn / fps).toFixed(1)} s</span>}
         </div>
       )}
-      {/* The two ends: a drag on one trims the clip. */}
-      <div className="clip-handle start" data-handle="start" />
-      <div className="clip-handle end" data-handle="end" />
+      {/* The two ends: a drag on one trims the clip; Ctrl+drag stretches it. */}
+      <div className="clip-handle start" data-handle="start" title="Drag to trim. Ctrl+drag to stretch (the speed changes)." />
+      <div className="clip-handle end" data-handle="end" title="Drag to trim. Ctrl+drag to stretch (the speed changes)." />
     </div>
   );
 });
@@ -341,13 +357,14 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline({ pr
       press.current = { kind: "box", startX, startY: event.clientY, startFrame: frameAt(startX), startLayer: layerAt(event.clientY), dragging: false, before: event.ctrlKey ? selection : new Set() };
       return;
     }
-    if (event.ctrlKey) {
+    const handle = target.dataset.handle;
+    /* Ctrl+click on a clip adds it to the selection or takes it out; Ctrl+drag on an end stretches the clip. */
+    if (event.ctrlKey && !handle) {
       const next = new Set(selection);
       if (!next.delete(clipId)) next.add(clipId);
       onSelect(next);
       return;
     }
-    const handle = target.dataset.handle;
     let ids = selection;
     let selectOnClick = false;
     if (handle || !selection.has(clipId)) {
@@ -358,7 +375,7 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline({ pr
     }
     event.currentTarget.setPointerCapture(event.pointerId);
     press.current = {
-      kind: handle === "start" ? "trimStart" : handle === "end" ? "trimEnd" : "move",
+      kind: handle === "start" ? (event.ctrlKey ? "stretchStart" : "trimStart") : handle === "end" ? (event.ctrlKey ? "stretchEnd" : "trimEnd") : "move",
       clipId,
       startX,
       startFrame: rawFrameAt(startX),
@@ -416,15 +433,15 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline({ pr
       /* The line shows only when the clips are really at the snapped place (a full place moves them on). */
       const moved = next.clips.find((clip) => clip.id === pressed.id);
       if (snap && moved && moved.start === pressed.start + wanted) line = snap.target;
-    } else if (current.kind === "trimStart") {
+    } else if (current.kind === "trimStart" || current.kind === "stretchStart") {
       const snap = findSnap([pressed.start + delta], targets, range);
       const wanted = pressed.start + delta + (snap?.adjust ?? 0);
-      next = trimStart(savedProject, pressed.id, wanted);
+      next = (current.kind === "trimStart" ? trimStart : stretchStart)(savedProject, pressed.id, wanted);
       if (snap && next.clips.find((clip) => clip.id === pressed.id)?.start === wanted) line = snap.target;
     } else {
       const snap = findSnap([clipEnd(pressed) + delta], targets, range);
       const wanted = clipEnd(pressed) + delta + (snap?.adjust ?? 0);
-      next = trimEnd(savedProject, pressed.id, wanted);
+      next = (current.kind === "trimEnd" ? trimEnd : stretchEnd)(savedProject, pressed.id, wanted);
       const trimmed = next.clips.find((clip) => clip.id === pressed.id);
       if (snap && trimmed && clipEnd(trimmed) === wanted) line = snap.target;
     }

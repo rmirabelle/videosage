@@ -39,7 +39,9 @@ export const SHORTCUT_GROUPS: readonly ShortcutGroup[] = [
       { keys: ["Delete"], does: "Delete the selected clips" },
       { keys: ["Ctrl+A"], does: "Select all clips" },
       { keys: ["S"], does: "Split at the playhead (the selected clips, or all clips there)" },
-      { keys: ["Ctrl+J"], does: "Join the selected clips" }
+      { keys: ["Ctrl+J"], does: "Join the selected clips" },
+      { keys: ["R"], does: "Reverse the selected clips (play them from end to start)" },
+      { keys: ["Ctrl+Drag"], does: "On a clip's end: stretch the clip (slower when longer, faster when shorter)" }
     ]
   },
   {
