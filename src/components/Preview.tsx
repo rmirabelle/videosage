@@ -1,7 +1,7 @@
 import { CaretLeft, CaretRight, Pause, Play, Repeat, SkipBack, SkipForward, SpeakerHigh, SpeakerSlash } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import { clipEnd, layerCount, projectEnd, type Clip, type Project } from "../editor/model";
-import { clipAt, topClipAt } from "../editor/operations";
+import { clipAt, fadeAt, topClipAt } from "../editor/operations";
 import { formatTimecode } from "../editor/time";
 
 type Slot = 0 | 1;
@@ -41,9 +41,11 @@ interface Lane {
   failed: [boolean, boolean];
   /** The element that shows the layer's clip now. */
   active: Slot;
+  /** During play in a crossfade: the id of the clip that starts, which plays in the other element. */
+  fadingId: string | null;
 }
 
-const newLane = (): Lane => ({ loaded: [null, null], waitingSeek: [null, null], failed: [false, false], active: 0 });
+const newLane = (): Lane => ({ loaded: [null, null], waitingSeek: [null, null], failed: [false, false], active: 0, fadingId: null });
 
 /** What one layer plays now, during play. */
 interface Playing {
@@ -85,6 +87,10 @@ export function Preview({ project, playhead, sources, playing, onPlaying, onPlay
   const latest = useRef({ project, playhead, sources, onPlaying, onPlayerFrame, seekCount, loopRange });
   latest.current = { project, playhead, sources, onPlaying, onPlayerFrame, seekCount, loopRange };
 
+  /** In a crossfade, the element of each layer that shows the clip that starts, over the other element; else null. */
+  const [fadeShown, setFadeShown] = useState<(Slot | null)[]>([]);
+  const fadeShownRef = useRef(fadeShown);
+
   /** Shows one element of a layer, or none. A change that changes nothing makes no render. */
   const show = (layer: number, slot: Slot | null) => {
     if ((shownRef.current[layer] ?? null) === slot) return;
@@ -92,6 +98,28 @@ export function Preview({ project, playhead, sources, playing, onPlaying, onPlay
     next[layer] = slot;
     shownRef.current = next;
     setShown(next);
+  };
+
+  /**
+   * Shows the crossfade of a layer: the element "slot" (the clip that
+   * starts) shows over the other one with "mix" of its picture, and the
+   * sound goes from the other element to it. With null, the layer has no
+   * crossfade, and both elements get their full picture and sound.
+   */
+  const showFade = (layer: number, slot: Slot | null, mix = 1) => {
+    if ((fadeShownRef.current[layer] ?? null) !== slot) {
+      const next = [...fadeShownRef.current];
+      next[layer] = slot;
+      fadeShownRef.current = next;
+      setFadeShown(next);
+    }
+    for (const each of [0, 1] as const) {
+      const video = element(layer, each);
+      if (!video) continue;
+      const amount = slot === null ? 1 : each === slot ? mix : 1 - mix;
+      video.style.opacity = slot === each ? String(mix) : "";
+      video.volume = Math.min(1, Math.max(0, amount));
+    }
   };
 
   const setSource = (layer: number, slot: Slot, url: string) => {
@@ -137,6 +165,7 @@ export function Preview({ project, playhead, sources, playing, onPlaying, onPlay
       const url = clip && sources.get(clip.mediaId);
       if (!clip || !url) {
         show(layer, null);
+        showFade(layer, null);
         continue;
       }
       const slot = lane(layer).active;
@@ -144,6 +173,15 @@ export function Preview({ project, playhead, sources, playing, onPlaying, onPlay
       /* The middle of the frame, so a rounding error cannot show the frame before. */
       seek(layer, slot, (clip.sourceIn + frame - clip.start + 0.5) / project.fps);
       show(layer, slot);
+      /* In a crossfade, the other element shows the clip that starts, over this one. */
+      const fade = fadeAt(project, frame, layer);
+      const fadeUrl = fade && sources.get(fade.in.mediaId);
+      if (fade && fadeUrl) {
+        const other = (1 - slot) as Slot;
+        setSource(layer, other, fadeUrl);
+        seek(layer, other, (fade.in.sourceIn + frame - fade.in.start + 0.5) / project.fps);
+        showFade(layer, other, fade.mix);
+      } else showFade(layer, null);
     }
     const top = topClipAt(project, frame);
     setNotReady(Boolean(top && !sources.get(top.mediaId)));
@@ -172,7 +210,8 @@ export function Preview({ project, playhead, sources, playing, onPlaying, onPlay
       const { project, sources } = latest.current;
       const state = now[layer];
       state.nextId = null;
-      const next = project.clips.find((clip) => clip.layer === layer && clip.start >= clipEnd(after));
+      /* The next clip can start before this one ends (a crossfade). */
+      const next = project.clips.find((clip) => clip.layer === layer && clip.start > after.start);
       const url = next && sources.get(next.mediaId);
       if (!next || !url) return;
       const slot = (1 - lane(layer).active) as Slot;
@@ -200,7 +239,15 @@ export function Preview({ project, playhead, sources, playing, onPlaying, onPlay
       }
       let slot = info.active;
       const other = (1 - slot) as Slot;
-      if (state.nextId === clip.id && frame - clip.start < 2 && !info.failed[other]) {
+      const fading = info.fadingId === clip.id;
+      info.fadingId = null;
+      showFade(layer, null);
+      if (fading && !info.failed[other]) {
+        /* The crossfade ends: the other element already plays this clip. */
+        element(layer, slot)?.pause();
+        slot = other;
+        info.active = slot;
+      } else if (state.nextId === clip.id && frame - clip.start < 2 && !info.failed[other]) {
         /* The other element already has this clip at its first frame: change to it. */
         element(layer, slot)?.pause();
         slot = other;
@@ -218,8 +265,53 @@ export function Preview({ project, playhead, sources, playing, onPlaying, onPlay
       prepareNext(layer, clip);
     };
 
-    /** Brings one layer to a frame of the clock: a new clip starts, a gap hides the layer, a late video seeks. */
+    /** Stops the crossfade of a layer, if it has one: the clip that starts stops, and the layer's clip gets its full picture and sound. */
+    const endFade = (layer: number) => {
+      const info = lane(layer);
+      if (info.fadingId === null) return;
+      info.fadingId = null;
+      element(layer, (1 - info.active) as Slot)?.pause();
+      showFade(layer, null);
+    };
+
+    /**
+     * In a crossfade, the other element of the layer plays the clip that
+     * starts, over the clip that ends, and the mix follows the clock.
+     */
+    const followFade = (layer: number, frame: number) => {
+      const { project, sources } = latest.current;
+      const state = now[layer];
+      const info = lane(layer);
+      const fade = fadeAt(project, frame, layer);
+      if (!fade || !state?.ready || state.clip?.id !== fade.out.id) {
+        endFade(layer);
+        return;
+      }
+      const other = (1 - info.active) as Slot;
+      const video = element(layer, other);
+      const url = sources.get(fade.in.mediaId);
+      if (!video || !url) return;
+      if (info.fadingId !== fade.in.id) {
+        const held = state.nextId === fade.in.id && frame - fade.in.start < 2;
+        setSource(layer, other, url);
+        if (!held) video.currentTime = fileTime(fade.in, frame);
+        void video.play().catch(() => {});
+        info.fadingId = fade.in.id;
+        state.nextId = fade.in.id;
+      } else if (!video.seeking && !video.ended && Math.abs(video.currentTime - fileTime(fade.in, frame)) > DRIFT_LIMIT) {
+        video.currentTime = fileTime(fade.in, frame);
+      }
+      showFade(layer, other, fade.mix);
+    };
+
+    /** Brings one layer to a frame of the clock, with its crossfade if it is in one. */
     const follow = (layer: number, frame: number, lead: boolean) => {
+      followClip(layer, frame, lead);
+      followFade(layer, frame);
+    };
+
+    /** Brings one layer to a frame of the clock: a new clip starts, a gap hides the layer, a late video seeks. */
+    const followClip = (layer: number, frame: number, lead: boolean) => {
       const { project } = latest.current;
       const state = (now[layer] ??= { clip: null, ready: false, nextId: null });
       const info = lane(layer);
@@ -238,8 +330,10 @@ export function Preview({ project, playhead, sources, playing, onPlaying, onPlay
       }
       if (!clip) {
         state.clip = null;
+        info.fadingId = null;
         pauseLayer(layer);
         show(layer, null);
+        showFade(layer, null);
         return;
       }
       const before = state.clip;
@@ -332,8 +426,8 @@ export function Preview({ project, playhead, sources, playing, onPlaying, onPlay
             <video
               key={`${layer}-${slot}`}
               ref={(node) => { (videos.current[layer] ??= [null, null])[slot] = node; }}
-              className={shown[layer] === slot ? "shown" : ""}
-              style={{ zIndex: layer }}
+              className={shown[layer] === slot || fadeShown[layer] === slot ? "shown" : ""}
+              style={{ zIndex: layer * 2 + (fadeShown[layer] === slot ? 1 : 0) }}
               muted={muted}
               playsInline
               preload="auto"

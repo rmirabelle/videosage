@@ -1,6 +1,6 @@
 [package]
 name = "videosage"
-version = "0.2.0"
+version = "0.3.0"
 description = "A simple linear video editor"
 authors = ["Rob Mirabelle"]
 edition = "2021"

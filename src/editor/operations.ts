@@ -5,7 +5,8 @@ import { mediaLength } from "./time";
  * The timeline edits. Each one takes a project and gives a new project; it
  * never changes its input. When an edit changes nothing, it gives back the
  * same project object, so the caller can skip the undo step. Clips on the
- * same layer do not overlap; clips on different layers can.
+ * same layer overlap only in a crossfade (see Project.clips); clips on
+ * different layers can overlap.
  */
 
 const byStart = (a: Clip, b: Clip) => a.start - b.start || a.layer - b.layer;
@@ -16,7 +17,50 @@ const overlaps = (aStart: number, aEnd: number, bStart: number, bEnd: number) =>
 
 const onLayer = (project: Project, layer: number) => project.clips.filter((clip) => clip.layer === layer);
 
-/** The clip on a layer that shows at a frame, if there is one. */
+/** The clips of a layer, in the order of the timeline. */
+const layerClips = (project: Project, layer: number) => onLayer(project, layer).sort(byStart);
+
+/** The frames that clip "b" overlaps the end of clip "a" on their layer: the length of their crossfade, or 0. */
+const fadeLength = (a: Clip | undefined, b: Clip | undefined) => a && b && a.start < b.start ? Math.max(0, Math.min(clipEnd(a), clipEnd(b)) - b.start) : 0;
+
+/** True when the clips of one layer (in the order of the timeline) keep the crossfade rules of Project.clips. */
+function layerFits(clips: readonly Clip[]): boolean {
+  return clips.every((clip, index) => {
+    if (clip.start < 0) return false;
+    const before = clips[index - 1];
+    if (before && !(clip.start > before.start && clipEnd(clip) > clipEnd(before))) return false;
+    const twoBefore = clips[index - 2];
+    return !twoBefore || clip.start >= clipEnd(twoBefore);
+  });
+}
+
+/**
+ * The crossfade of a layer at a frame, if the frame is in one: "out" is the
+ * clip that ends, "in" is the clip that starts, and "mix" goes from 0 to 1
+ * across the crossfade (how much of "in" shows and sounds). The frame can
+ * have a fraction.
+ */
+export function fadeAt(project: Project, frame: number, layer: number): { out: Clip; in: Clip; mix: number } | null {
+  const under = project.clips.filter((clip) => clip.layer === layer && clip.start <= frame && frame < clipEnd(clip));
+  if (under.length < 2) return null;
+  const [out, incoming] = under.sort(byStart);
+  const length = clipEnd(out) - incoming.start;
+  return { out, in: incoming, mix: Math.min(1, Math.max(0, (frame - incoming.start + 0.5) / length)) };
+}
+
+/** The length of each crossfade in frames, by the id of the clip that starts in it. */
+export function fadeIns(project: Project): Map<string, number> {
+  const fades = new Map<string, number>();
+  const last = new Map<number, Clip>();
+  for (const clip of [...project.clips].sort(byStart)) {
+    const length = fadeLength(last.get(clip.layer), clip);
+    if (length > 0) fades.set(clip.id, length);
+    last.set(clip.layer, clip);
+  }
+  return fades;
+}
+
+/** The clip on a layer that shows at a frame, if there is one. In a crossfade, it is the clip that ends. */
 export const clipAt = (project: Project, frame: number, layer = 0) =>
   project.clips.find((clip) => clip.layer === layer && clip.start <= frame && frame < clipEnd(clip));
 
@@ -30,15 +74,23 @@ function fits(fixed: Clip[], moving: Clip[], delta: number): boolean {
     && !fixed.some((other) => other.layer === clip.layer && overlaps(clip.start + delta, clipEnd(clip) + delta, other.start, clipEnd(other))));
 }
 
+/** True when the moving clips, moved by delta, keep the crossfade rules on their layers with the fixed clips. */
+function fitsWithFades(fixed: Clip[], moving: Clip[], delta: number): boolean {
+  const moved = moving.map((clip) => ({ ...clip, start: clip.start + delta }));
+  const all = [...fixed, ...moved];
+  return [...new Set(moved.map((clip) => clip.layer))].every((layer) => layerFits(all.filter((clip) => clip.layer === layer).sort(byStart)));
+}
+
 /**
  * The move nearest to the wanted one that puts the moving clips in free
  * space. The free moves make ranges whose limits are always one of these:
  * the group at frame 0, a moving clip's start at a fixed clip's end, or a
  * moving clip's end at a fixed clip's start (on the same layer). So only
- * those need a check.
+ * those need a check. With "fades", the wanted move can also overlap a part
+ * of a clip, which makes a crossfade.
  */
-function nearestFreeDelta(fixed: Clip[], moving: Clip[], wanted: number): number {
-  if (fits(fixed, moving, wanted)) return wanted;
+function nearestFreeDelta(fixed: Clip[], moving: Clip[], wanted: number, fades = false): number {
+  if (fades ? fitsWithFades(fixed, moving, wanted) : fits(fixed, moving, wanted)) return wanted;
   const candidates = [-Math.min(...moving.map((clip) => clip.start))];
   for (const other of fixed) {
     for (const clip of moving) {
@@ -56,8 +108,10 @@ function nearestFreeDelta(fixed: Clip[], moving: Clip[], wanted: number): number
 
 /**
  * Moves the clips with the given ids together by delta frames and by a
- * number of layers, to the nearest free position. The clips stop at layer
- * 0, and they can go one layer above the top layer (a new layer).
+ * number of layers. A clip that overlaps a part of a clip next to it on its
+ * layer makes a crossfade, in the rules of Project.clips; else the clips go
+ * to the nearest free position. The clips stop at layer 0, and they can go
+ * one layer above the top layer (a new layer).
  */
 export function moveClips(project: Project, ids: ReadonlySet<string>, delta: number, layerDelta = 0): Project {
   const moving = project.clips.filter((clip) => ids.has(clip.id));
@@ -67,7 +121,7 @@ export function moveClips(project: Project, ids: ReadonlySet<string>, delta: num
   const layers = Math.max(-lowest, Math.min(Math.round(layerDelta), layerCount(project) - highest));
   const fixed = project.clips.filter((clip) => !ids.has(clip.id));
   const lifted = moving.map((clip) => layers === 0 ? clip : { ...clip, layer: clip.layer + layers });
-  const best = nearestFreeDelta(fixed, lifted, Math.round(delta));
+  const best = nearestFreeDelta(fixed, lifted, Math.round(delta), true);
   if (best === 0 && layers === 0) return project;
   return withClips(project, [...fixed, ...lifted.map((clip) => best === 0 ? clip : { ...clip, start: clip.start + best })]);
 }
@@ -84,9 +138,34 @@ export function insertMedia(project: Project, mediaId: string, at: number, layer
 /** The frame after the last clip of a layer, or 0 for an empty layer. */
 export const layerEnd = (project: Project, layer: number) => onLayer(project, layer).reduce((end, clip) => Math.max(end, clipEnd(clip)), 0);
 
-/** Splits each clip that "chosen" picks and that has the frame inside it (not at its start) into two clips. */
+/**
+ * How an import puts its videos on the timeline. "layers": each video goes
+ * on a new layer on top, at "start" (on an empty timeline, the first video
+ * goes on layer 1). "track": the videos go one after the other on "layer",
+ * from "start".
+ */
+export type ImportPlacement = { mode: "layers"; start: number } | { mode: "track"; layer: number; start: number };
+
+/** The placement of a new import: at frame 0 on an empty timeline, else at the playhead (on a new layer on top). */
+export function importPlacement(project: Project, mode: ImportPlacement["mode"], playhead: number): ImportPlacement {
+  const empty = project.clips.length === 0;
+  const start = empty ? 0 : playhead;
+  return mode === "layers" ? { mode, start } : { mode, layer: empty ? 0 : layerCount(project), start };
+}
+
+/** Puts a full-length clip of a media file on the timeline, as the placement tells. */
+export function placeImport(project: Project, mediaId: string, placement: ImportPlacement): Project {
+  if (placement.mode === "track") return insertMedia(project, mediaId, Math.max(placement.start, layerEnd(project, placement.layer)), placement.layer).project;
+  const layer = project.clips.length === 0 ? 0 : layerCount(project);
+  return insertMedia(project, mediaId, placement.start, layer).project;
+}
+
+/**
+ * Splits each clip that "chosen" picks and that has the frame inside it
+ * (not at its start) into two clips. A layer is not split in a crossfade.
+ */
 function splitWhere(project: Project, frame: number, chosen: (clip: Clip) => boolean): Project {
-  const cut = project.clips.filter((clip) => chosen(clip) && clip.start < frame && frame < clipEnd(clip));
+  const cut = project.clips.filter((clip) => chosen(clip) && clip.start < frame && frame < clipEnd(clip) && !fadeAt(project, frame, clip.layer));
   if (cut.length === 0) return project;
   const cutIds = new Set(cut.map((clip) => clip.id));
   return withClips(project, project.clips.flatMap((clip) => {
@@ -100,6 +179,7 @@ function splitWhere(project: Project, frame: number, chosen: (clip: Clip) => boo
  * Splits clips at a frame into two clips each. When selected clips are
  * under the frame, only they are split; else every clip under the frame is
  * split, on all layers. The frame must be inside a clip, not at its start.
+ * A layer is not split in a crossfade.
  */
 export function splitAt(project: Project, frame: number, selected: ReadonlySet<string> = new Set()): Project {
   const under = project.clips.filter((clip) => clip.start < frame && frame < clipEnd(clip));
@@ -128,32 +208,53 @@ export function joinClips(project: Project, ids: ReadonlySet<string>): Project {
 
 /**
  * Deletes the clips. On the layer of a deleted clip, each later clip moves
- * back by the length of that clip, so the delete leaves no hole. Gaps that
- * were there before the delete stay. Other layers do not move.
+ * back by the length of the hole that the clip leaves, so the delete leaves
+ * no hole. The crossfades of a deleted clip go with it: the clips before and
+ * after it then touch. Gaps that were there before the delete stay. Other
+ * layers do not move.
  */
 export function deleteClips(project: Project, ids: ReadonlySet<string>): Project {
   if (!project.clips.some((clip) => ids.has(clip.id))) return project;
+  const sorted = [...project.clips].sort(byStart);
+  const previous = new Map<string, Clip>();
+  const next = new Map<string, Clip>();
+  const last = new Map<number, Clip>();
+  for (const clip of sorted) {
+    const before = last.get(clip.layer);
+    if (before) { previous.set(clip.id, before); next.set(before.id, clip); }
+    last.set(clip.layer, clip);
+  }
   const removed = new Map<number, number>();
   const clips: Clip[] = [];
-  for (const clip of [...project.clips].sort(byStart)) {
+  for (const clip of sorted) {
     const back = removed.get(clip.layer) ?? 0;
-    if (ids.has(clip.id)) removed.set(clip.layer, back + clip.length);
-    else clips.push(back > 0 ? { ...clip, start: clip.start - back } : clip);
+    if (ids.has(clip.id)) {
+      /* A crossfade between two deleted clips counts one time. */
+      const after = next.get(clip.id);
+      const hole = clip.length - fadeLength(previous.get(clip.id), clip) - (after && !ids.has(after.id) ? fadeLength(clip, after) : 0);
+      removed.set(clip.layer, back + hole);
+    } else clips.push(back > 0 ? { ...clip, start: clip.start - back } : clip);
   }
-  return { ...project, clips };
+  return withClips(project, clips);
 }
 
 /**
  * Moves the start of a clip to a new frame; the end stays. The start stops
  * at the end of the clip before it on its layer, at the first frame of the
- * media file, and one frame before the clip's end.
+ * media file, and one frame before the clip's end. In a crossfade with the
+ * clip before it, the start can make the crossfade longer or shorter, in
+ * the rules of Project.clips.
  */
 export function trimStart(project: Project, id: string, newStart: number): Project {
   const clip = project.clips.find((other) => other.id === id);
   if (!clip) return project;
-  const previousEnd = onLayer(project, clip.layer).reduce((end, other) => other.id !== id && clipEnd(other) <= clip.start ? Math.max(end, clipEnd(other)) : end, 0);
+  const clips = layerClips(project, clip.layer);
+  const index = clips.indexOf(clip);
+  const [twoBefore, before, after] = [clips[index - 2], clips[index - 1], clips[index + 1]];
+  const previousEnd = !before ? 0 : fadeLength(before, clip) > 0 ? Math.max(before.start + 1, twoBefore ? clipEnd(twoBefore) : 0) : clipEnd(before);
   const lowest = Math.max(previousEnd, clip.start - clip.sourceIn);
-  const start = Math.min(Math.max(Math.round(newStart), lowest), clipEnd(clip) - 1);
+  const highest = Math.min(clipEnd(clip) - 1, after && fadeLength(clip, after) > 0 ? after.start - 1 : Infinity);
+  const start = Math.min(Math.max(Math.round(newStart), lowest), highest);
   if (start === clip.start) return project;
   const change = start - clip.start;
   const trimmed: Clip = { ...clip, start, sourceIn: clip.sourceIn + change, length: clip.length - change };
@@ -163,29 +264,37 @@ export function trimStart(project: Project, id: string, newStart: number): Proje
 /**
  * Moves the end of a clip to a new frame; the start stays. The end stops
  * at the start of the clip after it on its layer, at the last frame of the
- * media file, and one frame after the clip's start.
+ * media file, and one frame after the clip's start. In a crossfade with the
+ * clip after it, the end can make the crossfade longer or shorter, in the
+ * rules of Project.clips.
  */
 export function trimEnd(project: Project, id: string, newEnd: number): Project {
   const clip = project.clips.find((other) => other.id === id);
   if (!clip) return project;
   const media = project.media.find((item) => item.id === clip.mediaId);
-  const nextStart = onLayer(project, clip.layer).reduce((next, other) => other.id !== id && other.start >= clipEnd(clip) ? Math.min(next, other.start) : next, Infinity);
+  const clips = layerClips(project, clip.layer);
+  const index = clips.indexOf(clip);
+  const [before, after, twoAfter] = [clips[index - 1], clips[index + 1], clips[index + 2]];
+  const nextStart = !after ? Infinity : fadeLength(clip, after) > 0 ? Math.min(clipEnd(after) - 1, twoAfter ? twoAfter.start : Infinity) : after.start;
   const mediaEnd = media ? clip.start + mediaLength(media, project.fps) - clip.sourceIn : Infinity;
-  const end = Math.max(Math.min(Math.round(newEnd), nextStart, mediaEnd), clip.start + 1);
+  const lowest = Math.max(clip.start + 1, before && fadeLength(before, clip) > 0 ? clipEnd(before) + 1 : 0);
+  const end = Math.max(Math.min(Math.round(newEnd), nextStart, mediaEnd), lowest);
   if (end === clipEnd(clip)) return project;
   return withClips(project, project.clips.map((other) => other.id === id ? { ...clip, length: end - clip.start } : other));
 }
 
 /**
  * Moves the clips of each layer together from frame 0, in their order, with
- * no gaps. With "layers", only those layers change.
+ * no gaps. The crossfades stay. With "layers", only those layers change.
  */
 export function closeGaps(project: Project, layers?: ReadonlySet<number>): Project {
   const next = new Map<number, number>();
+  const last = new Map<number, Clip>();
   let changed = false;
   const clips = [...project.clips].sort(byStart).map((clip) => {
     if (layers && !layers.has(clip.layer)) return clip;
-    const at = next.get(clip.layer) ?? 0;
+    const at = (next.get(clip.layer) ?? 0) - fadeLength(last.get(clip.layer), clip);
+    last.set(clip.layer, clip);
     next.set(clip.layer, at + clip.length);
     if (clip.start === at) return clip;
     changed = true;
@@ -206,14 +315,21 @@ export function copyClips(project: Project, ids: ReadonlySet<string>): Clipboard
  * Puts the clipboard clips at a frame, each on the layer it was copied
  * from. On each of those layers, a clip under that frame is split there, and
  * the clips after the frame move right by the room that the pasted clips
- * need. Clipboard clips of media that the project no longer has are left
- * out. Gives the ids of the new clips too.
+ * need. A paste in a crossfade goes before the crossfade's first clip.
+ * Clipboard clips of media that the project no longer has are left out.
+ * Gives the ids of the new clips too.
  */
 export function pasteClips(project: Project, clipboard: readonly ClipboardClip[], at: number): { project: Project; pastedIds: string[] } {
   const usable = clipboard.filter((item) => project.media.some((media) => media.id === item.mediaId));
   if (usable.length === 0) return { project, pastedIds: [] };
-  const frame = Math.max(0, Math.round(at));
   const layers = new Set(usable.map((item) => item.layer));
+  /* A paste in a crossfade goes before the crossfade's first clip. */
+  let frame = Math.max(0, Math.round(at));
+  for (;;) {
+    const fade = [...layers].map((layer) => fadeAt(project, frame, layer)).find((found) => found !== null);
+    if (!fade) break;
+    frame = fade.out.start;
+  }
   const base = splitWhere(project, frame, (clip) => layers.has(clip.layer));
   const origin = Math.min(...usable.map((item) => item.offset));
   const shifts = new Map<number, number>();

@@ -17,10 +17,10 @@ import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { Timeline, type TimelineHandle } from "./components/Timeline";
 import { TitleBar } from "./components/TitleBar";
 import { canRedo, canUndo, record, redo, startHistory, undo } from "./editor/history";
-import { clipEnd, emptyProject, layerCount, projectEnd, type ClipboardClip, type MediaItem, type Project } from "./editor/model";
-import { addMedia, canJoin, closeGaps, compactLayers, copyClips, deleteClips, insertMedia, joinClips, pasteClips, relinkMedia, removeMedia, selectionProject, selectionRange, splitAt } from "./editor/operations";
+import { clipEnd, emptyProject, projectEnd, type ClipboardClip, type MediaItem, type Project } from "./editor/model";
+import { addMedia, canJoin, closeGaps, compactLayers, copyClips, importPlacement, placeImport, deleteClips, insertMedia, joinClips, pasteClips, relinkMedia, removeMedia, selectionProject, selectionRange, splitAt } from "./editor/operations";
 import { FILE_EXTENSION, parseProject, serializeProject } from "./editor/projectFile";
-import { probeMedia } from "./lib/media";
+import { probeMedia, VIDEO_EXTENSIONS } from "./lib/media";
 import { addRecentProject, missingFiles, readProjectFile, recentProjects, writeProjectFile } from "./lib/projects";
 import { revealMainWindow } from "./lib/splash";
 import { checkForUpdate, getAppVersion, type UpdateInfo } from "./lib/updater";
@@ -49,6 +49,26 @@ const messageOf = (error: unknown) => error instanceof Error ? error.message : S
 
 let nextNoticeId = 1;
 
+/** The timeline panel's height in pixels: the user drags the line above it. The app keeps it for the next start. */
+const TIMELINE_HEIGHT_KEY = "videosage.timelineHeight";
+const DEFAULT_TIMELINE_HEIGHT = 260;
+const MIN_TIMELINE_HEIGHT = 120;
+/** The preview and the media list keep at least this height. */
+const MIN_TOP_HEIGHT = 160;
+
+function storedTimelineHeight() {
+  try {
+    const value = Number(localStorage.getItem(TIMELINE_HEIGHT_KEY));
+    return Number.isFinite(value) && value >= MIN_TIMELINE_HEIGHT ? value : DEFAULT_TIMELINE_HEIGHT;
+  } catch {
+    return DEFAULT_TIMELINE_HEIGHT;
+  }
+}
+
+function storeTimelineHeight(height: number) {
+  try { localStorage.setItem(TIMELINE_HEIGHT_KEY, String(Math.round(height))); } catch { /* The height is only a convenience. */ }
+}
+
 export default function App() {
   const [appVersion, setAppVersion] = useState("");
   const [startupUpdate, setStartupUpdate] = useState<UpdateInfo | null>(null);
@@ -63,6 +83,8 @@ export default function App() {
   const [history, setHistory] = useState(() => startHistory(emptyProject()));
   const [importing, setImporting] = useState<string[]>([]);
   const [dropActive, setDropActive] = useState(false);
+  const [timelineHeight, setTimelineHeight] = useState(storedTimelineHeight);
+  const workspaceRef = useRef<HTMLElement>(null);
   const [notices, setNotices] = useState<Notice[]>([]);
   const [removing, setRemoving] = useState<MediaItem | null>(null);
   const [playheadFrame, setPlayheadFrame] = useState(0);
@@ -145,11 +167,13 @@ export default function App() {
 
   /**
    * Reads the files one at a time. Each video goes in the media list and on
-   * the timeline, as one undo step. On an empty timeline, a video goes on
-   * layer 1; when the timeline has clips, each video goes on a new layer on
-   * top, at the playhead. A file that fails shows a message.
+   * the timeline, as one undo step. "mode" tells where the videos go (see
+   * placeImport): each on a new layer, or one after the other on one track.
+   * On an empty timeline they start at frame 0, else at the playhead. A file
+   * that fails shows a message.
    */
-  const importPaths = useCallback(async (paths: string[]) => {
+  const importPaths = useCallback(async (paths: string[], mode: "layers" | "track" = "layers") => {
+    const placement = importPlacement(projectRef.current, mode, playheadRef.current);
     for (const path of paths) {
       if (projectRef.current.media.some((item) => item.path === path)) continue;
       const name = fileName(path);
@@ -159,8 +183,7 @@ export default function App() {
         edit((current) => {
           const withMedia = addMedia(current, item);
           if (withMedia === current) return current;
-          if (withMedia.clips.length === 0) return insertMedia(withMedia, item.id, 0).project;
-          return insertMedia(withMedia, item.id, playheadRef.current, layerCount(withMedia)).project;
+          return placeImport(withMedia, item.id, placement);
         });
       } catch (error) {
         notify(`Could not import ${name}. ${String(error)}`);
@@ -173,10 +196,20 @@ export default function App() {
     }
   }, [edit, notify]);
 
+  /** Two or more new videos to import: the app asks whether they go on separate layers or on one track. */
+  const [placing, setPlacing] = useState<string[] | null>(null);
+
+  /** Imports video files. For two or more new files, it first asks where they go on the timeline. */
+  const importFiles = useCallback((paths: string[]) => {
+    const fresh = [...new Set(paths)].filter((path) => !projectRef.current.media.some((item) => item.path === path));
+    if (fresh.length > 1) setPlacing(fresh);
+    else if (fresh.length === 1) void importPaths(fresh);
+  }, [importPaths]);
+
   const importMedia = useCallback(async () => {
-    const picked = await pickFiles({ kind: "video", title: "Import Media", hint: "Choose one or more video files. When the timeline has clips, each video goes on a new layer at the playhead.", openLabel: "Import", multiple: true });
-    if (picked) await importPaths(picked);
-  }, [importPaths, pickFiles]);
+    const picked = await pickFiles({ kind: "video", title: "Import Media", hint: "Choose one or more video files. When the timeline has clips, the videos go at the playhead.", openLabel: "Import", multiple: true });
+    if (picked) importFiles(picked);
+  }, [importFiles, pickFiles]);
 
   /** Puts a media file on layer 1 after its last clip, and selects the new clip. */
   const addToTimeline = useCallback((item: MediaItem) => {
@@ -293,11 +326,15 @@ export default function App() {
     }
   };
 
-  /** Files dropped on the window: a project file opens, video files are imported. */
+  /** Files dropped on the window: a project file opens, video files are imported, other files show a message. */
   const dropPaths = (paths: string[]) => {
-    const projectPath = paths.find((path) => path.toLowerCase().endsWith(`.${FILE_EXTENSION}`));
-    if (projectPath) afterSaveQuestion(() => void openPath(projectPath));
-    else void importPaths(paths);
+    const extension = (path: string) => path.slice(path.lastIndexOf(".") + 1).toLowerCase();
+    const projectPath = paths.find((path) => extension(path) === FILE_EXTENSION);
+    if (projectPath) { afterSaveQuestion(() => void openPath(projectPath)); return; }
+    const videos = paths.filter((path) => VIDEO_EXTENSIONS.includes(extension(path)));
+    const others = paths.filter((path) => !videos.includes(path));
+    if (others.length > 0) notify(others.length === 1 ? `${fileName(others[0])} is not a video file.` : `${others.length} files are not video files.`);
+    importFiles(videos);
   };
   const dropPathsRef = useRef(dropPaths);
   dropPathsRef.current = dropPaths;
@@ -566,6 +603,37 @@ export default function App() {
     contextItem("Delete", <Trash size={15} />, "Del", "delete", true)
   ];
 
+  /** Drags the line above the timeline: the timeline gets taller or shorter. A double-click sets the first height again. */
+  const startTimelineResize = (event: React.PointerEvent<HTMLDivElement>) => {
+    const workspace = workspaceRef.current;
+    if (event.button !== 0 || !workspace) return;
+    event.preventDefault();
+    const handle = event.currentTarget;
+    handle.setPointerCapture(event.pointerId);
+    const bottom = workspace.getBoundingClientRect().bottom;
+    const maxHeight = Math.max(MIN_TIMELINE_HEIGHT, workspace.clientHeight - MIN_TOP_HEIGHT);
+    let height = timelineHeight;
+    const onMove = (move: PointerEvent) => {
+      height = Math.max(MIN_TIMELINE_HEIGHT, Math.min(maxHeight, bottom - move.clientY));
+      setTimelineHeight(height);
+    };
+    const onUp = () => {
+      handle.removeEventListener("pointermove", onMove);
+      handle.removeEventListener("pointerup", onUp);
+      handle.removeEventListener("pointercancel", onUp);
+      storeTimelineHeight(height);
+    };
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", onUp);
+    handle.addEventListener("pointercancel", onUp);
+  };
+  const resetTimelineHeight = () => {
+    setTimelineHeight(DEFAULT_TIMELINE_HEIGHT);
+    storeTimelineHeight(DEFAULT_TIMELINE_HEIGHT);
+  };
+  /* A small window shows less timeline; the preview keeps its least height. */
+  const timelineTrack = `min(${timelineHeight}px, max(${MIN_TIMELINE_HEIGHT}px, calc(100% - ${MIN_TOP_HEIGHT}px)))`;
+
   const menus: Menu[] = [
     {
       id: "file",
@@ -648,7 +716,17 @@ export default function App() {
     <div className="app">
       <TitleBar updateAvailable={startupUpdate !== null} onAbout={() => setAboutOpen(true)} fileName={projectName} dirty={dirty} />
       <MenuBar menus={menus} />
-      <main className="workspace">
+      <main className="workspace" ref={workspaceRef} style={{ gridTemplateRows: `1fr ${timelineTrack}` }}>
+        <div
+          className="timeline-resizer"
+          style={{ bottom: `calc(${timelineTrack} - 3px)` }}
+          role="separator"
+          aria-orientation="horizontal"
+          aria-label="Timeline height"
+          title="Drag to change the timeline height. Double-click for the first height."
+          onPointerDown={startTimelineResize}
+          onDoubleClick={resetTimelineHeight}
+        />
         <MediaBin media={project.media} proxies={proxies} missing={missing} onRelink={(media) => void relink(media)} importing={importing} dropActive={dropActive} onImport={() => void importMedia()} onRemove={requestRemove} onAddToTimeline={addToTimeline} />
         <Preview
           project={project}
@@ -686,6 +764,17 @@ export default function App() {
           confirmLabel="Remove"
           onConfirm={() => { edit((current) => removeMedia(current, removing.id)); setRemoving(null); }}
           onCancel={() => setRemoving(null)}
+        />
+      )}
+      {placing && (
+        <ConfirmDialog
+          title="Import videos"
+          message={<>Where do the <strong>{placing.length} videos</strong> go on the timeline?</>}
+          confirmLabel="Separate Layers"
+          otherLabel="One Track"
+          onConfirm={() => { void importPaths(placing, "layers"); setPlacing(null); }}
+          onOther={() => { void importPaths(placing, "track"); setPlacing(null); }}
+          onCancel={() => setPlacing(null)}
         />
       )}
       {clipMenu && <ContextMenu x={clipMenu.x} y={clipMenu.y} items={clipMenuItems} onClose={closeClipMenu} />}

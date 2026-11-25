@@ -1,7 +1,7 @@
 import { ArrowsOutLineHorizontal, MagnifyingGlassMinus, MagnifyingGlassPlus, Magnet, Scissors } from "@phosphor-icons/react";
 import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { clipEnd, layerCount, projectEnd, type Clip, type MediaItem, type Project } from "../editor/model";
-import { moveClips, trimEnd, trimStart } from "../editor/operations";
+import { fadeIns, moveClips, trimEnd, trimStart } from "../editor/operations";
 import { rulerLabel, rulerSteps } from "../editor/ruler";
 import { findSnap, snapTargets } from "../editor/snap";
 import { formatTimecode } from "../editor/time";
@@ -87,6 +87,8 @@ interface ClipViewProps {
   fps: number;
   zoom: number;
   selected: boolean;
+  /** The frames of the crossfade at the clip's start (it overlaps the clip before it), or 0. */
+  fadeIn: number;
   /** True while a drag moves or trims this clip. */
   dragging: boolean;
   /** The part of the timeline that is on screen, in pixels from frame 0. */
@@ -95,7 +97,7 @@ interface ClipViewProps {
 }
 
 /** One clip on the track: a name and a strip of pictures from its part of the media file. */
-const ClipView = memo(function ClipView({ clip, media, fps, zoom, selected, dragging, viewLeft, viewRight }: ClipViewProps) {
+const ClipView = memo(function ClipView({ clip, media, fps, zoom, selected, fadeIn, dragging, viewLeft, viewRight }: ClipViewProps) {
   const left = clip.start * zoom;
   const width = clip.length * zoom;
   const tiles: { index: number; atSec: number; left: number }[] = [];
@@ -133,6 +135,12 @@ const ClipView = memo(function ClipView({ clip, media, fps, zoom, selected, drag
       <div className="clip-strip">
         {media && tiles.map((tile) => <StripTile key={tile.index} path={media.path} atSec={tile.atSec} left={tile.left} width={tileWidth} />)}
       </div>
+      {/* The crossfade: the clip overlaps the end of the clip before it, and shows more and more across this part. */}
+      {fadeIn > 0 && (
+        <div className="clip-fade" style={{ width: fadeIn * zoom }} title={`Crossfade: ${(fadeIn / fps).toFixed(2)} s`}>
+          {fadeIn * zoom >= 44 && <span>{(fadeIn / fps).toFixed(1)} s</span>}
+        </div>
+      )}
       {/* The two ends: a drag on one trims the clip. */}
       <div className="clip-handle start" data-handle="start" />
       <div className="clip-handle end" data-handle="end" />
@@ -172,6 +180,7 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline({ pr
 
   const end = projectEnd(project);
   const mediaById = useMemo(() => new Map(project.media.map((item) => [item.id, item])), [project.media]);
+  const fades = useMemo(() => fadeIns(project), [project]);
   /**
    * The rows: one for each layer, and an empty row on top for a new layer.
    * They come from the saved project, so a drag does not add a row under
@@ -521,6 +530,7 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline({ pr
                       fps={project.fps}
                       zoom={zoom}
                       selected={selection.has(clip.id)}
+                      fadeIn={fades.get(clip.id) ?? 0}
                       dragging={draggingIds?.has(clip.id) ?? false}
                       viewLeft={viewLeft}
                       viewRight={viewRight}

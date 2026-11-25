@@ -9,6 +9,12 @@ export interface ExportSegment {
   /** The length of the part, in frames of the exported video. */
   frames: number;
   hasSound: boolean;
+  /**
+   * The frames that this part overlaps the end of the part before it: a
+   * crossfade, in which this part's picture and sound go up and the other
+   * part's go down. 0 for no crossfade.
+   */
+  fadeIn: number;
 }
 
 /**
@@ -17,7 +23,9 @@ export interface ExportSegment {
  * lengths add up with no drift when the export has a different frame rate
  * from the project. A clip that continues the clip before it (a split with no
  * other change) joins that segment. A part too short for one export frame is
- * left out. With "until" (a project frame), a gap at the end makes the
+ * left out. A clip that overlaps the clip before it gets the overlap as its
+ * "fadeIn" (a crossfade); the layer's length is the sum of the frames less
+ * the crossfades. With "until" (a project frame), a gap at the end makes the
  * layer that long.
  */
 export function exportSegments(project: Project, fps: number, layer = 0, until = 0): ExportSegment[] {
@@ -30,17 +38,20 @@ export function exportSegments(project: Project, fps: number, layer = 0, until =
     const item = media.get(clip.mediaId);
     if (!item) continue;
     const gap = cut(clip.start) - cut(position);
-    if (gap > 0) segments.push({ path: null, startSec: 0, frames: gap, hasSound: false });
+    if (gap > 0) segments.push({ path: null, startSec: 0, frames: gap, hasSound: false, fadeIn: 0 });
     const frames = cut(clipEnd(clip)) - cut(clip.start);
     const continues: boolean = before !== null && gap === 0 && before.mediaId === clip.mediaId
       && clipEnd(before) === clip.start && before.sourceIn + before.length === clip.sourceIn;
-    if (continues && segments.length > 0) segments[segments.length - 1].frames += frames;
-    else if (frames > 0) segments.push({ path: item.path, startSec: clip.sourceIn / project.fps, frames, hasSound: item.hasSound });
-    position = clipEnd(clip);
+    const last = segments[segments.length - 1];
+    /* A crossfade is shorter than both of its parts. */
+    const fadeIn = gap < 0 && before && last?.path ? Math.min(-gap, last.frames - 1, frames - 1) : 0;
+    if (continues && last) last.frames += frames;
+    else if (frames > 0) segments.push({ path: item.path, startSec: clip.sourceIn / project.fps, frames, hasSound: item.hasSound, fadeIn: Math.max(0, fadeIn) });
+    position = Math.max(position, clipEnd(clip));
     before = frames > 0 || continues ? clip : null;
   }
   const tail = cut(until) - cut(position);
-  if (tail > 0) segments.push({ path: null, startSec: 0, frames: tail, hasSound: false });
+  if (tail > 0) segments.push({ path: null, startSec: 0, frames: tail, hasSound: false, fadeIn: 0 });
   return segments;
 }
 

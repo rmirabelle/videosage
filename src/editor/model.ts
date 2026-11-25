@@ -42,7 +42,11 @@ export interface Project {
   width: number;
   height: number;
   media: MediaItem[];
-  /** Sorted by start. Clips on the same layer do not overlap. */
+  /**
+   * Sorted by start. Clips on the same layer overlap only in a crossfade: a
+   * clip can overlap a part of the clip before it on its layer, but not all
+   * of it, and not the clip before that one. The overlap is the crossfade.
+   */
   clips: Clip[];
 }
 

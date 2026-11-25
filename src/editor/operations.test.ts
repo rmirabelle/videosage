@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { clipEnd, type Clip, type MediaItem, type Project } from "./model";
-import { addMedia, canJoin, clipAt, closeGaps, compactLayers, selectionProject, selectionRange, topClipAt, copyClips, deleteClips, insertMedia, joinClips, moveClips, pasteClips, relinkMedia, removeMedia, splitAt, trimEnd, trimStart } from "./operations";
+import { addMedia, canJoin, clipAt, closeGaps, compactLayers, fadeAt, fadeIns, selectionProject, selectionRange, topClipAt, copyClips, deleteClips, importPlacement, insertMedia, joinClips, moveClips, pasteClips, placeImport, relinkMedia, removeMedia, splitAt, trimEnd, trimStart } from "./operations";
 
 /** A 10 s media file: 300 frames at the project's 30 fps. */
 const media = (id: string): MediaItem => ({ id, path: `C:\\Videos\\${id}.mp4`, name: `${id}.mp4`, durationSec: 10, fps: 30, width: 1920, height: 1080, hasSound: true, playable: true });
@@ -11,17 +11,28 @@ const project = (...clips: Clip[]): Project => ({ version: 2, fps: 30, width: 19
 
 const ids = (...list: string[]) => new Set(list);
 
-/** The rules that every project must keep after every edit. */
+/**
+ * The rules that every project must keep after every edit. On a layer, a
+ * clip can overlap a part of the clip before it (a crossfade), but not all
+ * of it, and not the clip before that one.
+ */
 function expectValid(result: Project) {
-  const layerEnds = new Map<number, number>();
+  const layerClips = new Map<number, Clip[]>();
   result.clips.forEach((item, index) => {
     expect(Number.isInteger(item.start) && item.start >= 0).toBe(true);
     expect(Number.isInteger(item.length) && item.length >= 1).toBe(true);
     expect(Number.isInteger(item.sourceIn) && item.sourceIn >= 0).toBe(true);
     expect(Number.isInteger(item.layer) && item.layer >= 0).toBe(true);
     if (index > 0) expect(item.start).toBeGreaterThanOrEqual(result.clips[index - 1].start);
-    expect(item.start).toBeGreaterThanOrEqual(layerEnds.get(item.layer) ?? 0);
-    layerEnds.set(item.layer, clipEnd(item));
+    const before = layerClips.get(item.layer) ?? [];
+    const last = before[before.length - 1];
+    const twoBefore = before[before.length - 2];
+    if (last) {
+      expect(item.start).toBeGreaterThan(last.start);
+      expect(clipEnd(item)).toBeGreaterThan(clipEnd(last));
+    }
+    if (twoBefore) expect(item.start).toBeGreaterThanOrEqual(clipEnd(twoBefore));
+    layerClips.set(item.layer, [...before, item]);
   });
   expect(new Set(result.clips.map((item) => item.id)).size).toBe(result.clips.length);
 }
@@ -91,12 +102,33 @@ describe("moveClips", () => {
     expect(layout(moveClips(project(clip("x", 5, 10)), ids("x"), -50))).toEqual([["x", 0, 10]]);
   });
 
-  it("takes the nearest free position when dropped on a clip", () => {
+  it("takes the nearest free position when dropped inside a clip", () => {
     const p = project(clip("x", 0, 10), clip("y", 50, 20));
-    /* Wanted start 45: before y (start 40) is nearer than after y (start 70). */
-    expect(layout(moveClips(p, ids("x"), 45))).toEqual([["x", 40, 10], ["y", 50, 20]]);
-    /* Wanted start 62: after y is nearer. */
-    expect(layout(moveClips(p, ids("x"), 62))).toEqual([["y", 50, 20], ["x", 70, 10]]);
+    /* Wanted start 52: before y (start 40) is nearer than after y (start 70). */
+    expect(layout(moveClips(p, ids("x"), 52))).toEqual([["x", 40, 10], ["y", 50, 20]]);
+    /* Wanted start 58: after y is nearer. */
+    expect(layout(moveClips(p, ids("x"), 58))).toEqual([["y", 50, 20], ["x", 70, 10]]);
+  });
+
+  it("makes a crossfade when a clip overlaps a part of the clip next to it", () => {
+    const p = project(clip("x", 0, 30), clip("y", 50, 20));
+    const before = moveClips(p, ids("x"), 30);
+    expectValid(before);
+    expect(layout(before)).toEqual([["x", 30, 30], ["y", 50, 20]]);
+    expect(fadeIns(before)).toEqual(new Map([["y", 10]]));
+    const after = moveClips(p, ids("y"), -10);
+    expect(layout(after)).toEqual([["x", 0, 30], ["y", 40, 20]]);
+    expect(fadeIns(after).size).toBe(0);
+    expect(fadeIns(moveClips(p, ids("y"), -25))).toEqual(new Map([["y", 5]]));
+  });
+
+  it("does not let three clips show at one frame of a layer, or a clip hold all of another", () => {
+    const p = project(clip("x", 0, 20), clip("y", 15, 25), clip("z", 100, 10));
+    /* z at 17 to 27 would be in the crossfade of x and y, and inside y. */
+    const result = moveClips(p, ids("z"), -83);
+    expectValid(result);
+    expect(layout(result)).toEqual([["x", 0, 20], ["y", 15, 25], ["z", 40, 10]]);
+    expect(fadeIns(result)).toEqual(new Map([["y", 5]]));
   });
 
   it("goes past a gap that is too small", () => {
@@ -108,11 +140,11 @@ describe("moveClips", () => {
   });
 
   it("moves a group together and keeps the distance between its clips", () => {
-    const p = project(clip("x", 0, 10), clip("y", 20, 10), clip("z", 100, 10));
+    const p = project(clip("x", 0, 10), clip("y", 20, 10), clip("z", 100, 5));
+    /* y at 95 to 105 would hold all of z, so the group's end (y) stops at z's start. */
     const result = moveClips(p, ids("x", "y"), 75);
     expectValid(result);
-    /* The group's end (y) stops at z's start. */
-    expect(layout(result)).toEqual([["x", 70, 10], ["y", 90, 10], ["z", 100, 10]]);
+    expect(layout(result)).toEqual([["x", 70, 10], ["y", 90, 10], ["z", 100, 5]]);
   });
 
   it("gives back the same project when nothing moves", () => {
@@ -214,6 +246,75 @@ describe("insertMedia", () => {
     expectValid(second.project);
     expect(second.project.clips.map((item) => [item.mediaId, item.start])).toEqual([["a", 0], ["b", 300]]);
     expect(insertMedia(project(), "none", 0).clipId).toBeNull();
+  });
+});
+
+describe("crossfades", () => {
+  /* x (0 to 100) fades into y (80 to 180); z (200 to 250) is after a gap. */
+  const faded = () => project(clip("x", 0, 100), clip("y", 80, 100, 0, "b"), clip("z", 200, 50));
+
+  it("finds the crossfade at a frame and how far it is", () => {
+    const p = faded();
+    expect(fadeAt(p, 79, 0)).toBeNull();
+    const fade = fadeAt(p, 80, 0);
+    expect([fade?.out.id, fade?.in.id]).toEqual(["x", "y"]);
+    expect(fade?.mix).toBeCloseTo(0.025);
+    expect(fadeAt(p, 99.5, 0)?.mix).toBe(1);
+    expect(fadeAt(p, 100, 0)).toBeNull();
+  });
+
+  it("deletes a clip with its crossfades, and the clips around it touch", () => {
+    const result = deleteClips(faded(), ids("y"));
+    expectValid(result);
+    expect(layout(result)).toEqual([["x", 0, 100], ["z", 120, 50]]);
+    const first = deleteClips(faded(), ids("x"));
+    expect(layout(first)).toEqual([["y", 0, 100, ], ["z", 120, 50]]);
+    const both = deleteClips(faded(), ids("x", "y"));
+    expect(layout(both)).toEqual([["z", 20, 50]]);
+  });
+
+  it("keeps the crossfades when it closes gaps", () => {
+    const result = closeGaps(project(clip("x", 10, 100), clip("y", 90, 100, 0, "b"), clip("z", 200, 50)));
+    expectValid(result);
+    expect(layout(result)).toEqual([["x", 0, 100], ["y", 80, 100], ["z", 180, 50]]);
+  });
+
+  it("trims a crossfade longer or shorter, in the rules", () => {
+    const p = project(clip("x", 0, 100), clip("y", 80, 100, 50, "b"));
+    expect(layout(trimStart(p, "y", 60))).toEqual([["x", 0, 100], ["y", 60, 120]]);
+    expect(layout(trimStart(p, "y", -20))).toEqual([["x", 0, 100], ["y", 30, 150]]);
+    expect(layout(trimStart(p, "y", 150))).toEqual([["x", 0, 100], ["y", 150, 30]]);
+    expect(layout(trimEnd(p, "x", 120))).toEqual([["x", 0, 120], ["y", 80, 100]]);
+    expect(layout(trimEnd(p, "x", 500))).toEqual([["x", 0, 179], ["y", 80, 100]]);
+    expect(layout(trimEnd(p, "y", 50))).toEqual([["x", 0, 100], ["y", 80, 21]]);
+    for (const result of [trimStart(p, "y", 0), trimEnd(p, "x", 999), trimEnd(p, "y", 0)]) expectValid(result);
+  });
+
+  it("does not split in a crossfade, and a paste goes before it", () => {
+    const p = faded();
+    expect(splitAt(p, 90)).toBe(p);
+    const { project: pasted } = pasteClips(p, [{ mediaId: "a", layer: 0, offset: 0, sourceIn: 0, length: 10 }], 90);
+    expectValid(pasted);
+    expect(pasted.clips.map((item) => item.start)).toEqual([0, 10, 90, 210]);
+  });
+});
+
+describe("placeImport", () => {
+  const place = (start: Project, mode: "layers" | "track", playhead: number) => {
+    const placement = importPlacement(start, mode, playhead);
+    const result = ["a", "b"].reduce((next, id) => placeImport(next, id, placement), start);
+    expectValid(result);
+    return result.clips.map((item) => [item.id === "x" ? "x" : item.mediaId, item.layer, item.start]);
+  };
+
+  it("puts each video on its own layer", () => {
+    expect(place(project(), "layers", 50)).toEqual([["a", 0, 0], ["b", 1, 0]]);
+    expect(place(project(clip("x", 0, 100)), "layers", 50)).toEqual([["x", 0, 0], ["a", 1, 50], ["b", 2, 50]]);
+  });
+
+  it("puts the videos one after the other on one track", () => {
+    expect(place(project(), "track", 50)).toEqual([["a", 0, 0], ["b", 0, 300]]);
+    expect(place(project(clip("x", 0, 100)), "track", 50)).toEqual([["x", 0, 0], ["a", 1, 50], ["b", 1, 350]]);
   });
 });
 

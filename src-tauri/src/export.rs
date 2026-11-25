@@ -37,6 +37,9 @@ pub struct Segment {
     /// The length of the part, in frames of the exported video.
     pub frames: u64,
     pub has_sound: bool,
+    /** The frames that this part overlaps the end of the part before it (a crossfade); 0 for none. */
+    #[serde(default)]
+    pub fade_in: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -58,9 +61,10 @@ impl ExportRequest {
         self.layers.iter().flatten()
     }
 
-    /** The length of the export, in frames: the longest layer. */
+    /** The length of the export, in frames: the longest layer. A crossfade makes a layer shorter by its overlap. */
     fn frames(&self) -> u64 {
-        self.layers.iter().map(|layer| layer.iter().map(|segment| segment.frames).sum::<u64>()).max().unwrap_or(0)
+        let length = |layer: &Vec<Segment>| layer.iter().map(|segment| segment.frames.saturating_sub(segment.fade_in)).sum::<u64>();
+        self.layers.iter().map(length).max().unwrap_or(0)
     }
 }
 
@@ -86,7 +90,9 @@ fn rate_text(fps: f64) -> String {
  * last frame holds and its sound is silent, so later clips stay in their
  * places. On layer 0 the bars around a clip and the gaps are black. On a
  * higher layer they are transparent, and the layer goes over the layers
- * under it; the sound of all layers is mixed.
+ * under it; the sound of all layers is mixed. A crossfade joins two parts
+ * of a layer with "xfade" (the picture) and "acrossfade" (the sound); the
+ * parts between crossfades are joined with "concat".
  */
 fn build_graph(request: &ExportRequest) -> String {
     let (width, height) = (request.width, request.height);
@@ -98,8 +104,17 @@ fn build_graph(request: &ExportRequest) -> String {
     for (layer, segments) in request.layers.iter().enumerate() {
         /* A higher layer keeps an alpha channel, so its gaps and bars show the layers under it. */
         let (format, fill) = if layer == 0 { ("yuv420p", "black") } else { ("yuva420p", "black@0") };
+        /* The runs of segments between crossfades: their stream labels, their count, their frames, and the crossfade before them. */
+        let mut runs: Vec<(String, usize, u64, u64)> = Vec::new();
         let mut labels = String::new();
+        let mut count = 0;
+        let mut run_frames = 0;
+        let mut run_fade = 0;
         for segment in segments {
+            if segment.fade_in > 0 && count > 0 {
+                runs.push((std::mem::take(&mut labels), count, run_frames, run_fade));
+                (count, run_frames, run_fade) = (0, 0, segment.fade_in);
+            }
             let frames = segment.frames;
             let seconds = frames as f64 / request.fps;
             let silence = format!("anullsrc=r=48000:cl=stereo,atrim=end={seconds:.6},aformat=sample_fmts=fltp[a{index}]");
@@ -128,9 +143,32 @@ fn build_graph(request: &ExportRequest) -> String {
             }
             labels.push_str(&format!("[v{index}][a{index}]"));
             index += 1;
+            count += 1;
+            run_frames += frames;
         }
+        runs.push((labels, count, run_frames, run_fade));
         let (video, sound) = if single { ("v".to_string(), "a".to_string()) } else { (format!("lv{layer}"), format!("la{layer}")) };
-        parts.push(format!("{labels}concat=n={}:v=1:a=1[{video}][{sound}]", segments.len()));
+        if runs.len() == 1 {
+            parts.push(format!("{}concat=n={}:v=1:a=1[{video}][{sound}]", runs[0].0, runs[0].1));
+            continue;
+        }
+        for (run, (labels, count, _, _)) in runs.iter().enumerate() {
+            parts.push(format!("{labels}concat=n={count}:v=1:a=1[r{layer}_{run}v][r{layer}_{run}a]"));
+        }
+        /* Each crossfade starts where the part before it ends less the crossfade; xfade needs the same time base on its two inputs. */
+        let (mut joined_video, mut joined_sound, mut joined_frames) = (format!("r{layer}_0v"), format!("r{layer}_0a"), runs[0].2);
+        for (run, &(_, _, frames, fade)) in runs.iter().enumerate().skip(1) {
+            let last = run + 1 == runs.len();
+            let (out_video, out_sound) = if last { (video.clone(), sound.clone()) } else { (format!("x{layer}_{run}v"), format!("x{layer}_{run}a")) };
+            let duration = fade as f64 / request.fps;
+            let offset = joined_frames.saturating_sub(fade) as f64 / request.fps;
+            parts.push(format!("[{joined_video}]settb=AVTB[t{layer}_{run}a]"));
+            parts.push(format!("[r{layer}_{run}v]settb=AVTB[t{layer}_{run}b]"));
+            parts.push(format!("[t{layer}_{run}a][t{layer}_{run}b]xfade=transition=fade:duration={duration:.6}:offset={offset:.6}[{out_video}]"));
+            parts.push(format!("[{joined_sound}][r{layer}_{run}a]acrossfade=d={duration:.6}:c1=tri:c2=tri[{out_sound}]"));
+            (joined_video, joined_sound) = (out_video, out_sound);
+            joined_frames = joined_frames + frames - fade;
+        }
     }
     if !single {
         let mut below = "lv0".to_string();
@@ -208,6 +246,15 @@ fn check(request: &ExportRequest) -> Result<(), String> {
     }
     if !(request.fps.is_finite() && (1.0..=240.0).contains(&request.fps)) {
         return Err("The frame rate is not correct.".into());
+    }
+    /* A crossfade joins two video parts, and it is shorter than both. */
+    for layer in &request.layers {
+        for (index, segment) in layer.iter().enumerate().filter(|(_, segment)| segment.fade_in > 0) {
+            let before = index.checked_sub(1).map(|before| &layer[before]);
+            if segment.path.is_none() || before.is_none_or(|before| before.path.is_none() || segment.fade_in >= before.frames) || segment.fade_in >= segment.frames {
+                return Err("A crossfade on the timeline is not correct.".into());
+            }
+        }
     }
     for path in request.segments().filter_map(|segment| segment.path.as_deref()) {
         if !Path::new(path).is_file() {
@@ -368,11 +415,16 @@ mod tests {
     use std::process::Command;
 
     fn clip(path: &str, start_sec: f64, frames: u64, has_sound: bool) -> Segment {
-        Segment { path: Some(path.into()), start_sec, frames, has_sound }
+        Segment { path: Some(path.into()), start_sec, frames, has_sound, fade_in: 0 }
+    }
+
+    /** A clip that overlaps the end of the clip before it by "fade_in" frames. */
+    fn faded(path: &str, start_sec: f64, frames: u64, fade_in: u64) -> Segment {
+        Segment { fade_in, ..clip(path, start_sec, frames, true) }
     }
 
     fn gap(frames: u64) -> Segment {
-        Segment { path: None, start_sec: 0.0, frames, has_sound: false }
+        Segment { path: None, start_sec: 0.0, frames, has_sound: false, fade_in: 0 }
     }
 
     fn request(segments: Vec<Segment>) -> ExportRequest {
@@ -421,6 +473,19 @@ mod tests {
         assert!(graph.contains("[lv0][lv1]overlay=format=auto:eof_action=pass[over]"));
         assert!(graph.contains("[over]format=yuv420p[v]"));
         assert!(graph.ends_with("[la0][la1]amix=inputs=2:normalize=0:duration=longest[a]"));
+    }
+
+    #[test]
+    fn a_crossfade_joins_two_parts_of_a_layer() {
+        let request = request(vec![clip("a.mp4", 0.0, 60, true), clip("b.mp4", 0.0, 30, true), faded("c.mp4", 0.0, 90, 15), gap(10)]);
+        let graph = build_graph(&request);
+        assert!(graph.contains("[v0][a0][v1][a1]concat=n=2:v=1:a=1[r0_0v][r0_0a]"));
+        assert!(graph.contains("[v2][a2][v3][a3]concat=n=2:v=1:a=1[r0_1v][r0_1a]"));
+        /* The crossfade starts at frame 90 - 15 = 75 (2.5 s) and is 15 frames (0.5 s) long. */
+        assert!(graph.contains("[t0_1a][t0_1b]xfade=transition=fade:duration=0.500000:offset=2.500000[v]"));
+        assert!(graph.contains("[r0_0a][r0_1a]acrossfade=d=0.500000:c1=tri:c2=tri[a]"));
+        assert_eq!(request.frames(), 60 + 30 + 90 - 15 + 10);
+        assert!(check(&layered(vec![vec![gap(30), faded("c.mp4", 0.0, 90, 15)]])).unwrap_err().contains("crossfade"));
     }
 
     #[test]
@@ -537,5 +602,34 @@ mod tests {
         assert_eq!(probe(&output, "v:0", "stream=nb_read_frames", true), "90");
         let sound_seconds: f64 = probe(&output, "a:0", "stream=duration", false).parse().unwrap();
         assert!((sound_seconds - 3.0).abs() < 0.05, "{sound_seconds}");
+    }
+
+    #[test]
+    #[ignore = "needs src-tauri/ffmpeg/ffmpeg.exe and ffprobe.exe"]
+    fn a_real_export_with_crossfades_has_the_exact_number_of_frames() {
+        let folder = tempfile::tempdir().unwrap();
+        let wide = folder.path().join("wide.mp4");
+        let tall = folder.path().join("tall.mp4");
+        make_video(&wide, "640x360", "30", "3", true);
+        make_video(&tall, "360x640", "25", "2", true);
+        let output = folder.path().join("fades.mp4");
+        let (wide, tall) = (wide.to_string_lossy().into_owned(), tall.to_string_lossy().into_owned());
+        let request = ExportRequest {
+            output: output.to_string_lossy().into_owned(),
+            width: 640,
+            height: 360,
+            fps: 30.0,
+            quality: "standard".into(),
+            layers: vec![
+                /* 60 + 45 + 30 - 15 - 10 = 110 frames. */
+                vec![clip(&wide, 0.0, 60, true), faded(&tall, 0.0, 45, 15), faded(&wide, 1.0, 30, 10)],
+                /* A crossfade on a higher layer keeps the transparent parts: 20 + 40 + 40 - 20 + 10 = 90 frames. */
+                vec![gap(20), clip(&tall, 0.0, 40, true), faded(&wide, 0.0, 40, 20), gap(10)],
+            ],
+        };
+        run_export(&real("ffmpeg.exe"), &request, folder.path(), &|_| {}).unwrap();
+        assert_eq!(probe(&output, "v:0", "stream=nb_read_frames", true), "110");
+        let sound_seconds: f64 = probe(&output, "a:0", "stream=duration", false).parse().unwrap();
+        assert!((sound_seconds - 110.0 / 30.0).abs() < 0.05, "{sound_seconds}");
     }
 }

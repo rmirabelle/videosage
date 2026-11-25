@@ -12,10 +12,10 @@ describe("exportSegments", () => {
   it("gives the clips and the gaps in the sequence of the timeline", () => {
     const segments = exportSegments(project(clip("y", 100, 60, 0, "b"), clip("x", 30, 45, 15)), 30);
     expect(segments).toEqual([
-      { path: null, startSec: 0, frames: 30, hasSound: false },
-      { path: "C:\\Videos\\a.mp4", startSec: 0.5, frames: 45, hasSound: true },
-      { path: null, startSec: 0, frames: 25, hasSound: false },
-      { path: "C:\\Videos\\b.mp4", startSec: 0, frames: 60, hasSound: false }
+      { path: null, startSec: 0, frames: 30, hasSound: false, fadeIn: 0 },
+      { path: "C:\\Videos\\a.mp4", startSec: 0.5, frames: 45, hasSound: true, fadeIn: 0 },
+      { path: null, startSec: 0, frames: 25, hasSound: false, fadeIn: 0 },
+      { path: "C:\\Videos\\b.mp4", startSec: 0, frames: 60, hasSound: false, fadeIn: 0 }
     ]);
   });
 
@@ -34,6 +34,16 @@ describe("exportSegments", () => {
 
   it("gives no segments for an empty timeline", () => {
     expect(exportSegments(project(), 30)).toEqual([]);
+  });
+
+  it("gives a crossfade as the overlap of a clip with the clip before it", () => {
+    /* x (0 to 100) fades into y (80 to 180), and the timeline ends at 200. */
+    const segments = exportSegments(project(clip("x", 0, 100), clip("y", 80, 100, 0, "b")), 30, 0, 200);
+    expect(segments.map((segment) => [segment.path !== null, segment.frames, segment.fadeIn])).toEqual([[true, 100, 0], [true, 100, 20], [false, 20, 0]]);
+    const total = segments.reduce((sum, segment) => sum + segment.frames - segment.fadeIn, 0);
+    expect(total).toBe(200);
+    /* At 60 fps, the crossfade is 40 export frames. */
+    expect(exportSegments(project(clip("x", 0, 100), clip("y", 80, 100, 0, "b")), 60)[1].fadeIn).toBe(40);
   });
 });
 
